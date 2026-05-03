@@ -66,7 +66,7 @@ var helpMsg = `
       -k, --kerberos               Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
           --dc-ip <ip>             Optionally specify ip of KDC when using Kerberos authentication
           --target-ip <ip>         Optionally specify ip of target when using Kerberos authentication
-          --dns-host <ip:port>     Override system's default DNS resolver 
+          --dns-host <ip:port>     Override system's default DNS resolver
           --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
           --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
       -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
