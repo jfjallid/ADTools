@@ -192,3 +192,60 @@ options:
       --verbose                Enable verbose logging
   -v, --version                Show version
 ```
+
+### LdapTool
+```
+Usage: ldaptool <subcommand> [options]
+
+Subcommands:
+  create-computer        Create a new computer account
+  create-user            Create a new user account
+  delete-object          Delete an LDAP object by DN
+  detect-channel-binding Detect if LDAP channel binding is required
+  detect-signing         Detect if LDAP signing is required
+  group                  Add or remove group members
+  laps                   Read LAPS local-admin passwords
+  modify                 Modify attributes on an LDAP object
+  rbcd                   Manage msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD)
+  search                 Search for LDAP objects
+  shadow-credentials     Manage msDS-KeyCredentialLink (Shadow Credentials)
+  shell                  Launch interactive shell
+  spn                    Manage servicePrincipalName on an object
+
+Run 'ldaptool <subcommand> --help' for action-specific options.
+
+    Connection options:
+          --host                 DC hostname or IP (required)
+      -P, --port                 LDAP port (default 389, or 636 with --tls)
+          --tls                  Use LDAPS (implicit TLS)
+          --starttls             Use StartTLS on plain LDAP port
+          --insecure             Skip TLS certificate verification
+          --base-dn              Search base DN (auto-detected if omitted)
+          --naming-context       Naming context: default, configuration, schema, root
+          --sasl                 SASL security: none, sign, seal
+          --channel              Enable TLS channel binding
+      -t, --timeout              Dial timeout (e.g. 5s, 1m; default 5s)
+          --socks-host           SOCKS5 proxy host
+          --socks-port           SOCKS5 proxy port (default 1080)
+
+    Authentication (NTLM unless --simple/--anonymous/--kerberos):
+      -d, --domain               AD domain (e.g. CORP)
+      -u, --user                 Username (or full DN with --simple)
+      -p, --pass                 Password (or set AD_PASSWORD env var)
+          --hash                 NT hash (pass-the-hash / Kerberos RC4)
+      -n, --no-pass              Send no password (unauthenticated NTLM bind)
+          --simple               LDAP simple bind (DN/password)
+          --anonymous            LDAP simple anonymous bind (no creds)
+
+    Kerberos (with -k/--kerberos):
+      -k, --kerberos             Use Kerberos (GSSAPI) instead of NTLM
+          --ccache               Path to Kerberos credential cache file (falls back to $KRB5CCNAME)
+          --krb5conf             Path to krb5.conf (default: /etc/krb5.conf)
+          --realm                Kerberos realm (defaults to upper-cased --domain)
+          --aes-key              Hex AES128/256 key (overpass-the-hash)
+          --override-spn         Service principal name (default: ldap/<host>)
+          --dc-ip <ip[:port]>    KDC address override (default port 88)
+          --dns-host <ip[:port]> Override system's default DNS resolver (default port 53)
+          --dns-tcp              Force DNS lookups over TCP
+
+```

@@ -55,7 +55,7 @@ import (
 
 var (
 	log            = golog.Get("")
-	release string = "0.1.0"
+	release string = "0.1.1"
 )
 
 var helpMsg = `
@@ -633,7 +633,7 @@ func main() {
 			DialTimeout: dialTimeout,
 		}
 		ldapClient := ldap.NewClient(ldapOpts)
-		err = ldapClient.Connect("dc01.skynet-ops.corp", 0)
+		err = ldapClient.Connect(host, 0)
 		if err != nil {
 			log.Errorf("LDAP connection failed: %v", err)
 			return

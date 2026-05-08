@@ -1,0 +1,69 @@
+"""group: add / remove member cycles.
+
+Uses the built-in "Guests" group (always present in any AD domain) as
+the target, and a disposable test user as the member.
+"""
+
+from __future__ import annotations
+
+from typing import Callable
+
+import pytest
+
+from lib.ad import build_user_dn, search_attr
+from lib.assertions import assert_call_succeeded, assert_contains, assert_not_contains
+from lib.runner import run, run_quiet
+from lib.target import Target
+
+pytestmark = pytest.mark.destructive
+
+
+@pytest.fixture
+def member_user(
+    target: Target,
+    base_dn: str,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+) -> tuple[str, str]:
+    name = ldaptest_name("group")
+    dn = build_user_dn(name, base_dn)
+    request.addfinalizer(lambda: run_quiet([
+        "delete-object", *target.common_argv(), "--dn", dn,
+    ]))
+    result = run([
+        "create-user",
+        *target.common_argv(),
+        "--cn", name,
+        "--sam", name,
+    ])
+    assert_call_succeeded(result)
+    return name, dn
+
+
+def test_group_add_then_remove(target: Target, member_user: tuple[str, str]) -> None:
+    name, _ = member_user
+    group = "Guests"  # well-known, always present
+
+    add = run([
+        "group",
+        *target.common_argv(),
+        "--action", "add",
+        "--group", group,
+        "--member", name,
+    ])
+    assert_call_succeeded(add)
+
+    after_add = search_attr(target, "Guests", "member")
+    assert_contains(after_add, name)
+
+    rm = run([
+        "group",
+        *target.common_argv(),
+        "--action", "remove",
+        "--group", group,
+        "--member", name,
+    ])
+    assert_call_succeeded(rm)
+
+    after_rm = search_attr(target, "Guests", "member")
+    assert_not_contains(after_rm, name)
