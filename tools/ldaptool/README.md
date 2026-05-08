@@ -8,7 +8,7 @@ detection. Includes an interactive shell.
 
 Bind methods: NTLM (default), Kerberos (GSSAPI), LDAP simple, anonymous.
 Transport: plain LDAP, LDAPS, StartTLS, optionally tunneled through SOCKS5.
-Pass-the-hash (`--hash`) and overpass-the-hash (`--aes-key`) supported.
+Pass-the-hash (`--hash`) and pass-the-key (`--aes-key`) supported.
 
 ## Build
 ```sh
@@ -82,7 +82,7 @@ NTLM is used unless `--simple`, `--anonymous`, or `--kerberos` is given.
 | `--ccache`       | Path to credential cache (falls back to `$KRB5CCNAME`)        |
 | `--krb5conf`     | Path to `krb5.conf` (default: `/etc/krb5.conf`)               |
 | `--realm`        | Kerberos realm (defaults to upper-cased `--domain`)           |
-| `--aes-key`      | Hex AES128/256 key (overpass-the-hash)                        |
+| `--aes-key`      | Hex AES128/256 key                                            |
 | `--override-spn` | Service principal name (default: `ldap/<host>`)               |
 | `--dc-ip`        | KDC address override (`host[:port]`, default port 88)         |
 | `--dns-host`     | Override system DNS resolver (`host[:port]`, default port 53) |

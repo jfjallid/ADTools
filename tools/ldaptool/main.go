@@ -56,7 +56,7 @@ var helpConnectionOptions = `
           --ccache               Path to Kerberos credential cache file (falls back to $KRB5CCNAME)
           --krb5conf             Path to krb5.conf (default: /etc/krb5.conf)
           --realm                Kerberos realm (defaults to upper-cased --domain)
-          --aes-key              Hex AES128/256 key (overpass-the-hash)
+          --aes-key              Hex AES128/256 key
           --override-spn         Service principal name (default: ldap/<host>)
           --dc-ip <ip[:port]>    KDC address override (default port 88)
           --dns-host <ip[:port]> Override system's default DNS resolver (default port 53)
