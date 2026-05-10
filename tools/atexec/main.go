@@ -72,11 +72,6 @@ var helpMsg = `
           --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
           --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
       -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
-          --relay                  Start an SMB listener that will relay incoming
-                                   NTLM authentications to the remote server and
-                                   use that connection. NOTE that this forces SMB 2.1
-                                   without encryption.
-          --relay-port <port>      Listening port for relay (default 445)
       -c, --command <str>          Command to execute
       -a, --args <str>             Command arguments
           --no-delete              Do not delete the scheduled task after execution
@@ -121,8 +116,8 @@ func randomTaskName() string {
 
 func main() {
 	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, command, cmdArgs string
-	var port, socksPort, relayPort int
-	var debug, localUser, forceSMB2, relay, version, verbose, noPass, kerberos, dnsTCP, noenc, noDelete bool
+	var port, socksPort int
+	var debug, localUser, forceSMB2, version, verbose, noPass, kerberos, dnsTCP, noenc, noDelete bool
 	var err error
 	var dialTimeout time.Duration
 	var dialSocksProxy proxy.Dialer
@@ -167,8 +162,6 @@ func main() {
 	flag.StringVar(&cmdArgs, "args", "", "")
 	flag.BoolVar(&noDelete, "no-delete", false, "")
 	flag.BoolVar(&forceSMB2, "smb2", false, "")
-	flag.BoolVar(&relay, "relay", false, "")
-	flag.IntVar(&relayPort, "relay-port", 445, "")
 
 	flag.Parse()
 
@@ -391,14 +384,7 @@ func main() {
 		DisableEncryption: noenc,
 		Initiator:   smbMech,
 	}
-	var conn *smb.Connection
-
-	if relay {
-		smbOpts.RelayPort = relayPort
-		conn, err = smb.NewRelayConnection(smbOpts)
-	} else {
-		conn, err = smb.NewConnection(smbOpts)
-	}
+	conn, err := smb.NewConnection(smbOpts)
 	if err != nil {
 		log.Errorf("SMB connect failed: %s", err)
 		return
