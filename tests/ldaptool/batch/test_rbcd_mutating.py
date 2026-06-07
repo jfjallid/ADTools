@@ -12,7 +12,7 @@ from typing import Callable
 
 import pytest
 
-from lib.ad import build_user_dn, search_attr
+from lib.ad import build_computer_dn, build_user_dn, search_attr
 from lib.assertions import assert_call_succeeded, assert_contains, assert_not_contains
 from lib.runner import run, run_quiet
 from lib.target import Target
@@ -128,3 +128,62 @@ def test_rbcd_add_list_remove_clear(
         "--target", target_sam,
     ])
     assert_call_succeeded(clear)
+
+
+def test_rbcd_computer_trustee(
+    target: Target,
+    base_dn: str,
+    ldaps_available: None,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+) -> None:
+    """A computer (sAMAccountName ending in `$`) can be the trustee.
+
+    Mirrors the testplan §9 flow where `LDAPTESTPC2$` is granted RBCD on
+    a victim user. Validates that the `$` suffix is plumbed correctly
+    through to the SID lookup.
+    """
+    target_name = ldaptest_name("rbcdct")
+    computer_name = ldaptest_name("rbcdcc")
+
+    target_dn = build_user_dn(target_name, base_dn)
+    computer_dn = build_computer_dn(computer_name, base_dn)
+    request.addfinalizer(lambda: run_quiet([
+        "delete-object", *target.common_argv(), "--dn", target_dn,
+    ]))
+    request.addfinalizer(lambda: run_quiet([
+        "delete-object", *target.common_argv(), "--dn", computer_dn,
+    ]))
+
+    user_create = run([
+        "create-user",
+        *target.common_argv(),
+        "--cn", target_name,
+        "--sam", target_name,
+    ])
+    assert_call_succeeded(user_create)
+    comp_create = run([
+        "create-computer",
+        *target.common_argv(),
+        "--tls", "--insecure",
+        "--cn", computer_name,
+    ])
+    assert_call_succeeded(comp_create)
+
+    trustee_sam = computer_name + "$"
+    add = run([
+        "rbcd", *target.common_argv(),
+        "--action", "add",
+        "--target", target_name,
+        "--trustee", trustee_sam,
+    ])
+    assert_call_succeeded(add)
+
+    listed = run([
+        "rbcd", *target.common_argv(),
+        "--action", "list",
+        "--target", target_name,
+    ])
+    assert_call_succeeded(listed)
+    trustee_sid = _trustee_sid(target, trustee_sam)
+    assert_contains(listed, trustee_sid)

@@ -504,11 +504,11 @@ func (self *shell) cmdloop() {
 		}
 	}
 
-	// Silence library logging to prevent interference with terminal output
-	golog.Set("github.com/jfjallid/ldap/v3", "ldap", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/gokrb5/v8", "krb5", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	golog.Set("github.com/jfjallid/go-smb/ntlmssp", "ntlmssp", golog.LevelNone, 0, golog.NoOutput, golog.NoOutput)
-	logger.SetLogLevel(golog.LevelNone)
+	// Silence every registered package logger (and our own "main") so library
+	// output does not corrupt the interactive terminal. Iterating golog.Names()
+	// via applyLogLevel covers every logger this binary registers rather than a
+	// hand-maintained subset, so newly imported packages stay quiet too.
+	applyLogLevel(golog.LevelNone, nil)
 
 	if self.conn != nil {
 		defer self.conn.Close()

@@ -34,6 +34,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -54,8 +55,8 @@ import (
 )
 
 var (
-	log            = golog.Get("")
-	release string = "0.1.1"
+	log            = golog.Get("main")
+	release string = "0.1.2"
 )
 
 var helpMsg = `
@@ -89,11 +90,107 @@ var helpMsg = `
           --noenc                  Run ldap queries without encryption.
           --tls                    Run ldap over TLS port 636
           --starttls               Try to upgrade ldap to TLS on port 389
+          --sasl                   SASL security: none, sign, seal (default seal)
+          --cb                     Enable TLS channel binding (default false)
           --format                 Output format (impacket,default,...)
-          --debug                  Enable debug logging
-          --verbose                Enable verbose logging
+          --debug                  Enable debug logging. Bare --debug turns on every
+                                   registered package; --debug=smb,dcerpc turns on only the
+                                   listed package-name suffixes (the '=' form is required
+                                   for the filter).
+          --verbose                Enable verbose logging. Same filter syntax as --debug.
+                                   --debug and --verbose may be combined with different
+                                   filters; a package targeted by both gets the higher level.
+          --list-log-packages      List the registered log package names that can be
+                                   targeted with --debug=<suffix> or --verbose=<suffix>,
+                                   then exit
       -v, --version                Show version
 `
+
+// logFlag is a comma-separated package-suffix filter that also remembers
+// whether the user passed the flag at all. IsBoolFlag is set so the bare
+// "--debug" and "--verbose" form parses (the flag pkg then calls Set("true"))
+// — we treat "true" as "no filter, all packages on". A filter list requires
+// the "=" form, e.g. --debug=smb,dcerpc, because IsBoolFlag stops the parser
+// from consuming the next positional token.
+type logFlag struct {
+	set    bool
+	values []string
+}
+
+func (d *logFlag) String() string { return strings.Join(d.values, ",") }
+
+func (d *logFlag) IsBoolFlag() bool { return true }
+
+func (d *logFlag) Set(s string) error {
+	d.set = true
+	d.values = nil
+	if s == "" || s == "true" {
+		return nil
+	}
+	for _, tok := range strings.Split(s, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			d.values = append(d.values, tok)
+		}
+	}
+	return nil
+}
+
+// applyLogLevel bumps registered package loggers to level. An empty filter
+// matches every name returned by golog.Names(); a non-empty filter keeps only
+// names whose path suffix matches one of the tokens (see matchesAny).
+func applyLogLevel(level int, filter []string) {
+	flags := golog.LstdFlags | golog.Lshortfile
+	for _, name := range golog.Names() {
+		if len(filter) == 0 || matchesAny(name, filter) {
+			golog.Set(name, "", level, flags, nil, nil)
+		}
+	}
+}
+
+// matchesAny reports whether name equals any token or ends with "/"+token,
+// so "smb" hits ".../go-smb/smb" but not ".../go-smb" (ends in "/go-smb",
+// not "/smb") and not ".../smb/server" (ends in "/server").
+func matchesAny(name string, tokens []string) bool {
+	for _, t := range tokens {
+		if name == t || strings.HasSuffix(name, "/"+t) {
+			return true
+		}
+	}
+	return false
+}
+
+// listLogPackages prints every registered log package name. The package
+// loggers register themselves at import time, so golog.Names() here lists
+// every logger this binary can target; the suffix of any of these names is
+// what --debug=/--verbose= matches.
+func listLogPackages() {
+	names := golog.Names()
+	sort.Strings(names)
+	fmt.Println("Registered log packages (target a name's suffix with --debug=<suffix> or --verbose=<suffix>):")
+	for _, name := range names {
+		fmt.Println(name)
+	}
+}
+
+// configureLogging applies the --debug / --verbose filters. The two are not
+// mutually exclusive: each may carry its own comma-separated package filter
+// (e.g. --debug=smb,dcerpc --verbose=main). Verbose is applied first and debug
+// second so any package targeted by both ends up at the higher level
+// (LevelDebug > LevelInfo). A bare --debug or --verbose (empty filter) targets
+// every registered package, so passing both bare is ambiguous and rejected.
+func configureLogging(debug, verbose logFlag) bool {
+	if debug.set && verbose.set && len(debug.values) == 0 && len(verbose.values) == 0 {
+		fmt.Println("Cannot enable both --debug and --verbose for all packages at once. Specify just one of them, or be more granular e.g. --debug=smb,dcerpc --verbose=main")
+		return false
+	}
+	if verbose.set {
+		applyLogLevel(golog.LevelInfo, verbose.values)
+	}
+	if debug.set {
+		applyLogLevel(golog.LevelDebug, debug.values)
+	}
+	return true
+}
 
 func isFlagSet(name string) bool {
 	found := false
@@ -217,10 +314,25 @@ func discoverDRSUAPIEndpoint(host string, port int, dial func(addr string) (net.
 	return
 }
 
+func saslSecurityFromArgs(mode string) ldap.SASLMode {
+	switch strings.ToLower(mode) {
+	case "none":
+		return ldap.SASLNone
+	case "sign":
+		return ldap.SASLSign
+	case "seal":
+		return ldap.SASLSeal
+	default:
+		return ldap.SASLSeal
+	}
+}
+
 func main() {
-	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, target, ldapFilter, excludeUsers, targetFile, format string
+	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, target, ldapFilter, excludeUsers, targetFile, format, saslModeStr string
 	var port, socksPort int
-	var debug, version, verbose, noPass, kerberos, dnsTCP, useSamr, history, ntlmOnly, noenc, tls, starttls, enabled bool
+	var version, noPass, kerberos, dnsTCP, useSamr, history, ntlmOnly, noenc, tls, starttls, enabled, channelBind, listLog bool
+	var debug, verbose logFlag
+
 	var err error
 	var dialTimeout time.Duration
 	var dialSocksProxy proxy.Dialer
@@ -240,8 +352,9 @@ func main() {
 	flag.StringVar(&domain, "domain", "", "")
 	flag.IntVar(&port, "P", 135, "")
 	flag.IntVar(&port, "port", 135, "")
-	flag.BoolVar(&debug, "debug", false, "")
-	flag.BoolVar(&verbose, "verbose", false, "")
+	flag.Var(&debug, "debug", "")
+	flag.Var(&verbose, "verbose", "")
+	flag.BoolVar(&listLog, "list-log-packages", false, "")
 	flag.DurationVar(&dialTimeout, "t", 5*time.Second, "")
 	flag.DurationVar(&dialTimeout, "timeout", 5*time.Second, "")
 	flag.BoolVar(&version, "v", false, "")
@@ -258,45 +371,29 @@ func main() {
 	flag.StringVar(&dnsHost, "dns-host", "", "")
 	flag.BoolVar(&dnsTCP, "dns-tcp", false, "")
 	flag.StringVar(&target, "target", "", "")
-    flag.StringVar(&ldapFilter, "ldap-filter", "(&(objectClass=user))", "")
-    flag.StringVar(&excludeUsers, "exclude-users", "", "")
+	flag.StringVar(&ldapFilter, "ldap-filter", "(&(objectClass=user))", "")
+	flag.StringVar(&excludeUsers, "exclude-users", "", "")
 	flag.BoolVar(&useSamr, "use-samr", false, "")
-    flag.BoolVar(&history, "history", false, "")
-    flag.BoolVar(&noenc, "noenc", false, "")
-    flag.BoolVar(&tls, "tls", false, "")
-    flag.BoolVar(&starttls, "starttls", false, "")
-    flag.BoolVar(&ntlmOnly, "ntlm-only", false, "")
-    flag.BoolVar(&enabled, "enabled", false, "")
-    flag.StringVar(&targetFile, "target-file", "", "")
-    flag.StringVar(&format, "format", "", "")
+	flag.BoolVar(&history, "history", false, "")
+	flag.BoolVar(&noenc, "noenc", false, "")
+	flag.BoolVar(&tls, "tls", false, "")
+	flag.BoolVar(&starttls, "starttls", false, "")
+	flag.BoolVar(&ntlmOnly, "ntlm-only", false, "")
+	flag.BoolVar(&enabled, "enabled", false, "")
+	flag.StringVar(&targetFile, "target-file", "", "")
+	flag.StringVar(&format, "format", "", "")
+	flag.StringVar(&saslModeStr, "sasl", "seal", "")
+	flag.BoolVar(&channelBind, "cb", false, "")
 
 	flag.Parse()
 
-	if debug {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/msdrsr", "msdrsr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/gokrb5/v8", "gokrb5", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
-		log.SetLogLevel(golog.LevelDebug)
-	} else if verbose {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/msdrsr", "msdrsr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetLogLevel(golog.LevelInfo)
-	} else {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/msdrsr", "msdrsr", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mssamr", "mssamr", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+	if listLog {
+		listLogPackages()
+		return
+	}
+
+	if !configureLogging(debug, verbose) {
+		return
 	}
 
 	if version {
@@ -321,14 +418,19 @@ func main() {
 		}
 	}
 
-	if useSamr && isFlagSet("ldapFilter") {
+	if useSamr && isFlagSet("ldap-filter") {
 		log.Errorln("--use-samr and --ldap-filter flags are mutually exclusive!")
 		flag.Usage()
 		return
 	}
 
 	if tls && starttls {
-		log.Errorln("--tls and --start-tls are mutually exclusive!")
+		log.Errorln("--tls and --starttls are mutually exclusive!")
+		flag.Usage()
+		return
+	}
+	if !(tls || starttls) && channelBind {
+		log.Errorln("--cb requires a TLS connection to enable channel binding")
 		flag.Usage()
 		return
 	}
@@ -354,7 +456,6 @@ func main() {
 			ldapFilter = fmt.Sprintf("%s(!(userAccountControl:1.2.840.113556.1.4.803:=2))(|(accountExpires=0)(accountExpires>=%d)))", strings.TrimSuffix(ldapFilter, ")"), expiryDate)
 		}
 	}
-
 
 	if isFlagSet("dns-host") {
 		parts := strings.Split(dnsHost, ":")
@@ -458,7 +559,7 @@ func main() {
 				}
 				password = string(passBytes)
 			}
-			
+
 		}
 	}
 
@@ -494,11 +595,11 @@ func main() {
 	newMech := func() gss.Mechanism {
 		if kerberos {
 			mech := &spnego.KRB5Initiator{
-				User:     username,
-				Password: password,
-				Domain:   domain,
-				Hash:     hashBytes,
-				AESKey:   aesKeyBytes,
+				User:        username,
+				Password:    password,
+				Domain:      domain,
+				Hash:        hashBytes,
+				AESKey:      aesKeyBytes,
 				SPN:         "host/" + host,
 				DCIP:        dcIP,
 				DialTimeout: dialTimeout,
@@ -517,10 +618,10 @@ func main() {
 			return mech
 		}
 		return &spnego.NTLMInitiator{
-			User:      username,
-			Password:  password,
-			Hash:      hashBytes,
-			Domain:    domain,
+			User:     username,
+			Password: password,
+			Hash:     hashBytes,
+			Domain:   domain,
 		}
 	}
 
@@ -627,10 +728,10 @@ func main() {
 		log.Infoln("[*] Querying ldap server for accounts")
 		ldapOpts := ldap.ClientOptions{
 			InsecureSkipVerify: true,
-			UseStartTLS: starttls,
-			UseTLS: tls,
-			Dialer: dialSocksProxy,
-			DialTimeout: dialTimeout,
+			UseStartTLS:        starttls,
+			UseTLS:             tls,
+			Dialer:             dialSocksProxy,
+			DialTimeout:        dialTimeout,
 		}
 		ldapClient := ldap.NewClient(ldapOpts)
 		err = ldapClient.Connect(host, 0)
@@ -639,10 +740,14 @@ func main() {
 			return
 		}
 		defer ldapClient.Close()
+		saslMode := saslSecurityFromArgs(saslModeStr)
+		if tls || starttls {
+			saslMode = ldap.SASLNone
+		}
 		ldapBindOpts := ldap.BindOptions{
-			SPN: "host/" + host,
-			SASLMode: ldap.SASLSeal,
-			ChannelBinding: true,
+			SPN:            "host/" + host,
+			SASLMode:       saslMode,
+			ChannelBinding: channelBind,
 		}
 		if noenc {
 			ldapBindOpts.SASLMode = ldap.SASLNone
@@ -650,25 +755,28 @@ func main() {
 		err = ldapClient.Bind(newMech(), ldapBindOpts)
 		if err != nil {
 			if be, found := errors.AsType[*ldap.BindError](err); found {
-			    switch be.Kind {
-			    case ldap.BindFailureChannelBinding:
+				switch be.Kind {
+				case ldap.BindFailureChannelBinding:
 					log.Errorf("ldap channel binding required!")
-			    case ldap.BindFailureSigning:
+				case ldap.BindFailureSigning:
 					log.Errorf("ldap signing required! Use TLS or skip --noenc flag")
-			    case ldap.BindFailureConfidentialityRequired:
+				case ldap.BindFailureConfidentialityRequired:
 					log.Errorf("ldaps (TLS) required! Use --tls or --starttls flag")
-			    case ldap.BindFailureCredentials:
+				case ldap.BindFailureCredentials:
 					if status, found := ldap.SubStatusMap[be.SubStatus]; found {
 						log.Errorf("ldap bind failed: %s", status)
 					} else {
 						log.Errorf("ldap bind failed with invalid credentials substatus: %d", be.SubStatus)
 					}
-			    }
+				default:
+					log.Errorf("Bind failed with unclassified error: %v\n", err)
+				}
 			} else {
 				log.Errorf("LDAP bind failed: %v", err)
 			}
 			return
 		}
+		log.Infof("Performing LDAP search using filter: %q\n", ldapFilter)
 		ldapResult, err := ldapClient.Search("", ldapFilter, []string{"samaccountname"}, 0)
 		if err != nil {
 			log.Errorf("LDAP search failed: %v", err)
@@ -744,11 +852,11 @@ func main() {
 		for _, result := range results {
 			rid := result.ObjectSID[strings.LastIndex(result.ObjectSID, "-")+1:]
 			accountStatus := "Enabled"
-			if result.UserAccountControl & 0x2 == 0x2 {
+			if result.UserAccountControl&0x2 == 0x2 {
 				accountStatus = "Disabled"
 			}
 			lmHash := "aad3b435b51404eeaad3b435b51404ee"
-			ntHash :=  "7903a0de258a921f09f205ab08cd2ef2"
+			ntHash := "7903a0de258a921f09f205ab08cd2ef2"
 			if result.LMHash != nil {
 				lmHash = hex.EncodeToString(result.LMHash)
 			}

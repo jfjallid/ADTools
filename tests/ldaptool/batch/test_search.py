@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 
 import pytest
@@ -60,6 +61,32 @@ def test_search_preset(target: Target, preset: str, expected: str) -> None:
     assert_contains(result, expected)
 
 
+@pytest.mark.parametrize("preset", [
+    "kerberoastable",
+    "asreproastable",
+    "trusts",
+    "gpos",
+    "unconstrained",
+])
+def test_search_preset_accepted(target: Target, preset: str) -> None:
+    """Presets that may legitimately match zero objects in a clean lab.
+
+    The lab DC may have no kerberoastable / AS-REP-roastable / trusted
+    domains / GPOs / unconstrained-delegation accounts. We only assert
+    the preset is recognised and the call completes — the row count is
+    environment-dependent.
+    """
+    result = run(_search(
+        target,
+        "--preset", preset,
+        "--attrs", "sAMAccountName,distinguishedName",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    # "Found N entr..." is printed even when N=0 in human format.
+    assert_contains(result, "Found")
+
+
 @pytest.mark.parametrize("scope", ["base", "one", "sub"])
 def test_search_scope(target: Target, scope: str) -> None:
     """Each scope value is accepted.
@@ -93,6 +120,23 @@ def test_search_attrs_specific(target: Target) -> None:
     assert_call_succeeded(result)
     assert_contains(result, "cn:")
     assert_contains(result, "objectSid:")
+
+
+def test_search_operational_attr_only(target: Target) -> None:
+    """Requesting an operational attribute by name (without `+`) returns it.
+
+    `createTimestamp` is operational; AD only emits operational attrs when
+    asked for them explicitly or via `+`. Asking for it by name should
+    surface the value alongside the implicit dn line.
+    """
+    result = run(_search(
+        target,
+        "--filter", "(sAMAccountName=Administrator)",
+        "--attrs", "createTimestamp",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    assert_contains(result, "createTimestamp:")
 
 
 def test_search_attrs_all_user_and_operational(target: Target) -> None:
@@ -193,6 +237,24 @@ def test_search_paging(target: Target) -> None:
     assert_contains(result, "Found")
 
 
+def test_search_paging_disabled(target: Target) -> None:
+    """`--page-size 0` disables paging and uses an unpaged search.
+
+    Combined with --size-limit so a small result set comes back regardless
+    of how large the directory grows.
+    """
+    result = run(_search(
+        target,
+        "--filter", "(objectClass=user)",
+        "--attrs", "sAMAccountName",
+        "--page-size", "0",
+        "--size-limit", "5",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    assert_contains(result, "Found")
+
+
 def test_search_no_banner_suppresses_request_block(target: Target) -> None:
     """Banner is on by default and lists the effective request."""
     with_banner = run(_search(
@@ -226,4 +288,66 @@ def test_search_show_deleted_control(target: Target) -> None:
     ))
     assert_call_succeeded(result)
     # Tombstone container may be empty; assert the tool didn't reject the control.
+    assert "Found" in result.combined
+
+
+def _user_sams_in_order(combined: str) -> list[str]:
+    """Extract sAMAccountName values from a human-format result block.
+
+    The output emits each entry's attributes after a `DN:` line; the
+    sAMAccountName lines appear once per entry in result order. Human
+    format indents attributes by two spaces, so the regex matches
+    optional leading whitespace.
+    """
+    return re.findall(r"^\s*sAMAccountName:\s*(\S+)\s*$", combined, re.MULTILINE)
+
+
+def test_search_server_sort_ascending(target: Target) -> None:
+    """`--control server-sort=<attr>` sorts the result set ascending."""
+    result = run(_search(
+        target,
+        "--filter", "(objectClass=user)",
+        "--attrs", "sAMAccountName",
+        "--control", "server-sort=sAMAccountName",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    sams = _user_sams_in_order(result.combined)
+    # AD returns at least Administrator + krbtgt + Guest in any domain.
+    assert len(sams) >= 2, f"expected ≥2 sAMAccountName lines, got: {sams!r}"
+    assert sams == sorted(sams, key=str.lower), (
+        f"server-sort ascending did not order results: {sams!r}"
+    )
+
+
+def test_search_server_sort_descending(target: Target) -> None:
+    """`--control server-sort=-<attr>` sorts descending (leading '-')."""
+    result = run(_search(
+        target,
+        "--filter", "(objectClass=user)",
+        "--attrs", "sAMAccountName",
+        "--control", "server-sort=-sAMAccountName",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    sams = _user_sams_in_order(result.combined)
+    assert len(sams) >= 2, f"expected ≥2 sAMAccountName lines, got: {sams!r}"
+    assert sams == sorted(sams, key=str.lower, reverse=True), (
+        f"server-sort descending did not order results: {sams!r}"
+    )
+
+
+def test_search_multiple_controls(target: Target) -> None:
+    """Multiple `--control` flags compose: show-deleted + server-sort."""
+    result = run(_search(
+        target,
+        "--filter", "(objectClass=*)",
+        "--attrs", "distinguishedName",
+        "--scope", "sub",
+        "--control", "show-deleted",
+        "--control", "server-sort=cn",
+        "--no-banner",
+    ))
+    assert_call_succeeded(result)
+    # The combination is accepted by the server; row count depends on lab.
     assert "Found" in result.combined

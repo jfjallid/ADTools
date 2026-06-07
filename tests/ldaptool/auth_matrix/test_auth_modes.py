@@ -11,10 +11,13 @@ gracefully reports which modes are exercisable on the current target.
 
 from __future__ import annotations
 
+import os
+
+import pexpect
 import pytest
 
 from lib.assertions import assert_call_succeeded, assert_contains
-from lib.runner import run
+from lib.runner import binary_path, run
 from lib.target import Target
 
 
@@ -49,6 +52,42 @@ def test_ntlm_password(target: Target) -> None:
         "--domain", target.domain,
     ))
     _assert_dcs(result)
+
+
+def test_ntlm_password_prompt(target: Target) -> None:
+    """No `--pass`/`-n`/`AD_PASSWORD` → prompt on stderr, read from TTY.
+
+    The runner's normal `subprocess.run` plumbs stdin to /dev/null so any
+    accidental prompt fails fast; this test deliberately drives a real
+    PTY via pexpect to feed the prompt.
+    """
+    argv = [
+        "search",
+        *target.conn_argv(),
+        "--user", target.user,
+        "--domain", target.domain,
+        "--preset", "dcs",
+        "--attrs", "sAMAccountName",
+        "--no-banner",
+    ]
+    # Strip AD_PASSWORD so the binary actually prompts.
+    env = {k: v for k, v in os.environ.items() if k != "AD_PASSWORD"}
+    proc = pexpect.spawn(
+        binary_path(),
+        argv,
+        encoding="utf-8",
+        timeout=30,
+        env=env,  # type: ignore[arg-type]
+        dimensions=(40, 200),
+    )
+    try:
+        proc.expect("Enter password:", timeout=15)
+        proc.sendline(target.password)
+        proc.expect(pexpect.EOF, timeout=30)
+        output = proc.before or ""
+    finally:
+        proc.close(force=True)
+    assert "DC01" in output, f"prompt-based auth didn't surface DCs:\n{output}"
 
 
 def test_ntlm_hash(target: Target) -> None:

@@ -18,7 +18,7 @@ var shadowUsageKeys = []string{
 }
 
 func init() {
-	usageMap[ShellShadowCreds] = ShellShadowCreds + " -action add|list|remove|clear -target <sam> [-device-id id] [-out file] [-pfx-pass pw]"
+	usageMap[ShellShadowCreds] = ShellShadowCreds + " -action add|list|remove|clear -target <sam> [-device-id id] [-out file] [-pfx-pass pw] [-no-pfx-pass]"
 	descriptionMap[ShellShadowCreds] = "Manage msDS-KeyCredentialLink (Shadow Credentials)"
 
 	handlers[ShellShadowCreds] = shellShadowCredsCmd
@@ -42,7 +42,8 @@ func shellShadowCredsCmd(self *shell, argArr any) {
 	target := fs.String("target", "", "sAMAccountName of target account (required)")
 	deviceID := fs.String("device-id", "", "Device ID to remove (for 'remove' action)")
 	outFile := fs.String("out", "", "Output PFX file path (default: <target>.pfx)")
-	pfxPass := fs.String("pfx-pass", "", "PFX file password")
+	pfxPass := fs.String("pfx-pass", "", "PFX file password (random if omitted)")
+	noPfxPass := fs.Bool("no-pfx-pass", false, "Use an empty PFX password instead of generating one")
 
 	if err := fs.Parse(args); err != nil {
 		if buf.Len() > 0 {
@@ -62,6 +63,12 @@ func shellShadowCredsCmd(self *shell, argArr any) {
 
 	switch *action {
 	case "add":
+		pass, generated, err := resolvePfxPass(*pfxPass, *noPfxPass)
+		if err != nil {
+			self.printf("%v\n", err)
+			return
+		}
+
 		dn, _, err := lookupTarget(conn, baseDN, *target)
 		if err != nil {
 			self.printf("Target lookup failed: %v\n", err)
@@ -82,7 +89,7 @@ func shellShadowCredsCmd(self *shell, argArr any) {
 			return
 		}
 
-		pfxData, err := exportPFX(rand.Reader, key, cert, *pfxPass)
+		pfxData, err := exportPFX(rand.Reader, key, cert, pass)
 		if err != nil {
 			self.printf("PFX export failed: %v\n", err)
 			return
@@ -100,9 +107,7 @@ func shellShadowCredsCmd(self *shell, argArr any) {
 		self.printf("Shadow credential added to %s\n", dn)
 		self.printf("  Device ID:  %s\n", devID.String())
 		self.printf("  PFX file:   %s\n", out)
-		if *pfxPass == "" {
-			self.printf("  PFX pass:   (empty)\n")
-		}
+		printPfxPass(self.printf, pass, generated)
 
 	case "list":
 		dn, existing, err := lookupTarget(conn, baseDN, *target)

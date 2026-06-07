@@ -46,8 +46,12 @@ options:
       --socks-host <target>    Establish connection via a SOCKS5 proxy server
       --socks-port <port>      SOCKS5 proxy port (default 1080)
       --noenc                  Disable RPC encryption
-      --debug                  Enable debug logging
-      --verbose                Enable verbose logging
+      --debug                  Enable debug logging. Bare --debug enables every registered
+                               package; --debug=smb,dcerpc filters to the listed package-name
+                               suffixes (the '=' form is required for the filter).
+      --verbose                Enable verbose logging (same --verbose=pkg filter syntax)
+      --list-log-packages      List registered log package names targetable by
+                               --debug=<suffix> or --verbose=<suffix>, then exit
   -v, --version                Show version
 ```
 
@@ -77,8 +81,12 @@ options:
       --socks-host <target>    Establish connection via a SOCKS5 proxy server
       --socks-port <port>      SOCKS5 proxy port (default 1080)
       --noenc                  Disable RPC encryption
-      --debug                  Enable debug logging
-      --verbose                Enable verbose logging
+      --debug                  Enable debug logging. Bare --debug enables every registered
+                               package; --debug=smb,dcerpc filters to the listed package-name
+                               suffixes (the '=' form is required for the filter).
+      --verbose                Enable verbose logging (same --verbose=pkg filter syntax)
+      --list-log-packages      List registered log package names targetable by
+                               --debug=<suffix> or --verbose=<suffix>, then exit
   -v, --version                Show version
 ```
 
@@ -113,8 +121,12 @@ options:
       --socks-host <target>    Establish connection via a SOCKS5 proxy server
       --socks-port <port>      SOCKS5 proxy port (default 1080)
       --noenc                  Disable RPC encryption
-      --debug                  Enable debug logging
-      --verbose                Enable verbose logging
+      --debug                  Enable debug logging. Bare --debug enables every registered
+                               package; --debug=smb,dcerpc filters to the listed package-name
+                               suffixes (the '=' form is required for the filter).
+      --verbose                Enable verbose logging (same --verbose=pkg filter syntax)
+      --list-log-packages      List registered log package names targetable by
+                               --debug=<suffix> or --verbose=<suffix>, then exit
   -v, --version                Show version
 ```
 
@@ -143,10 +155,14 @@ options:
       --no-delete              Do not delete the scheduled task after execution
       --socks-host <target>    Establish connection via a SOCKS5 proxy server
       --socks-port <port>      SOCKS5 proxy port (default 1080)
-      --noenc                  Disable smb encryption
+      --noenc                  Disable smb encryption (does not work for WinServ 2025)
       --smb2                   Force smb 2.1
-      --debug                  Enable debug logging
-      --verbose                Enable verbose logging
+      --debug                  Enable debug logging. Bare --debug enables every registered
+                               package; --debug=smb,dcerpc filters to the listed package-name
+                               suffixes (the '=' form is required for the filter).
+      --verbose                Enable verbose logging (same --verbose=pkg filter syntax)
+      --list-log-packages      List registered log package names targetable by
+                               --debug=<suffix> or --verbose=<suffix>, then exit
   -v, --version                Show version
 ```
 
@@ -183,8 +199,12 @@ options:
       --tls                    Run ldap over TLS port 636
       --starttls               Try to upgrade ldap to TLS on port 389
       --format                 Output format (impacket,default,...)
-      --debug                  Enable debug logging
-      --verbose                Enable verbose logging
+      --debug                  Enable debug logging. Bare --debug enables every registered
+                               package; --debug=smb,dcerpc filters to the listed package-name
+                               suffixes (the '=' form is required for the filter).
+      --verbose                Enable verbose logging (same --verbose=pkg filter syntax)
+      --list-log-packages      List registered log package names targetable by
+                               --debug=<suffix> or --verbose=<suffix>, then exit
   -v, --version                Show version
 ```
 
@@ -193,16 +213,20 @@ options:
 Usage: ldaptool <subcommand> [options]
 
 Subcommands:
+  access                 Compute a principal's effective access to an object
   create-computer        Create a new computer account
   create-user            Create a new user account
+  dacl                   View and modify DACLs on object security descriptors
   delete-object          Delete an LDAP object by DN
   detect-channel-binding Detect if LDAP channel binding is required
   detect-signing         Detect if LDAP signing is required
   group                  Add or remove group members
   laps                   Read LAPS local-admin passwords
   modify                 Modify attributes on an LDAP object
+  owner                  View and change the owner SID of an object's security descriptor
   rbcd                   Manage msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD)
   search                 Search for LDAP objects
+  set-password           Set or change an account's password (unicodePwd)
   shadow-credentials     Manage msDS-KeyCredentialLink (Shadow Credentials)
   shell                  Launch interactive shell
   spn                    Manage servicePrincipalName on an object

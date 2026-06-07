@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import pytest
@@ -55,6 +56,38 @@ def test_spn_in_shell(shell: LdapShell, victim: tuple[str, str]) -> None:
     assert "SPN updated" in out, out
 
 
+def test_spn_replace_then_remove_in_shell(
+    shell: LdapShell, victim: tuple[str, str],
+) -> None:
+    """`spn -replace` overwrites; `spn -remove` deletes a single value.
+
+    The batch-mode test covers add/remove/replace cycles; this exercises
+    the same dispatcher in the REPL since spn_shell.go has its own arg
+    parser.
+    """
+    name, dn = victim
+
+    seed = shell.cmd(f"spn -dn {dn} -add HTTP/seed.example.com")
+    assert "SPN updated" in seed, seed
+
+    replaced = shell.cmd(f"spn -dn {dn} -replace HOST/{name}")
+    assert "SPN updated" in replaced, replaced
+
+    after = shell.cmd(
+        f"search -filter (sAMAccountName={name}) -attrs servicePrincipalName -no-banner"
+    )
+    assert "seed.example.com" not in after, after
+    assert f"HOST/{name}" in after, after
+
+    removed = shell.cmd(f"spn -dn {dn} -remove HOST/{name}")
+    assert "SPN updated" in removed, removed
+
+    after_rm = shell.cmd(
+        f"search -filter (sAMAccountName={name}) -attrs servicePrincipalName -no-banner"
+    )
+    assert f"HOST/{name}" not in after_rm, after_rm
+
+
 def test_group_in_shell(shell: LdapShell, victim: tuple[str, str]) -> None:
     name, _ = victim
     out_add = shell.cmd(f"group -action add -group Guests -member {name}")
@@ -96,3 +129,49 @@ def test_laps_in_shell(shell: LdapShell) -> None:
     out = shell.cmd("laps")
     # Whatever the lab returns, the call should not error out.
     assert "Error" not in out, out
+
+
+def test_laps_specific_target_in_shell(shell: LdapShell) -> None:
+    """`laps -target <sam>` narrows to a single computer.
+
+    LAPS attrs may not be set on the lab DC, so we accept either a
+    result block or the "no readable" diagnostic — but no Error.
+    """
+    out = shell.cmd("laps -target DC01")
+    assert "Error" not in out, out
+
+
+def test_shadowcreds_add_list_clear_in_shell(
+    target: Target,
+    base_dn: str,
+    ldaps_available: None,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+    tmp_path,
+) -> None:
+    """The `shadowcreds` REPL command mirrors the batch-mode add→list→clear flow.
+
+    Spawns its own LDAPS-bound shell — `shadowcreds add` writes
+    msDS-KeyCredentialLink and that requires a confidential channel.
+    """
+    name = ldaptest_name("ssh")
+    dn = build_user_dn(name, base_dn)
+    request.addfinalizer(lambda: _cleanup(target, dn))
+    _create(target, name)
+
+    pfx_path = str(tmp_path / f"{name}.pfx")
+    sh = LdapShell(target, extra_args=["--tls", "--insecure"])
+    try:
+        added = sh.cmd(f"shadowcreds -action add -target {name} -out {pfx_path}")
+        assert "Shadow credential added" in added, added
+        assert os.path.exists(pfx_path), f"PFX not written at {pfx_path}"
+
+        listed = sh.cmd(f"shadowcreds -action list -target {name}")
+        # Listing must not error; presence of a Device ID confirms the add.
+        assert "Error" not in listed, listed
+        assert "Device ID" in listed, listed
+
+        cleared = sh.cmd(f"shadowcreds -action clear -target {name}")
+        assert "Error" not in cleared, cleared
+    finally:
+        sh.close()

@@ -5,7 +5,7 @@ const ShellRBCD = "rbcd"
 var rbcdUsageKeys = []string{ShellRBCD}
 
 func init() {
-	usageMap[ShellRBCD] = ShellRBCD + " -action add|list|remove|clear -target <sam> [-trustee <sid|sam> ...]"
+	usageMap[ShellRBCD] = ShellRBCD + " -action add|list|remove|clear -target <sam> [-trustee <sid|sam> ...] [-dry-mode]"
 	descriptionMap[ShellRBCD] = "Manage msDS-AllowedToActOnBehalfOfOtherIdentity (RBCD)"
 
 	handlers[ShellRBCD] = shellRBCDCmd
@@ -45,6 +45,10 @@ func shellRBCDCmd(self *shell, argArr any) {
 	case "list", "clear":
 	default:
 		self.printf("Unknown action: %s (valid: add, list, remove, clear)\n", c.action)
+		return
+	}
+	if c.dryMode && c.action != "add" {
+		self.println("Error: -dry-mode is only valid with -action add")
 		return
 	}
 	if err := runRBCD(self.conn, self.baseDN, c, &shellWriter{self}); err != nil {

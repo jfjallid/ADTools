@@ -6,7 +6,7 @@ from typing import Callable
 
 import pytest
 
-from lib.ad import build_user_dn
+from lib.ad import build_computer_dn, build_user_dn
 from lib.runner import run_quiet
 from lib.shell import LdapShell
 from lib.target import Target
@@ -51,3 +51,29 @@ def test_deleteobject_in_shell(
 
     delete = shell.cmd(f"deleteobject -dn {dn}")
     assert "Deleted" in delete, delete
+
+
+def test_createcomputer_in_shell(
+    target: Target,
+    base_dn: str,
+    ldaps_available: None,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+) -> None:
+    """`createcomputer` mirrors batch-mode create-computer, with the same
+    LDAPS prerequisite (the tool sets unicodePwd over the secure channel).
+
+    The session-default `shell` fixture binds over plain LDAP, so this
+    test spawns its own LDAPS-bound shell.
+    """
+    name = ldaptest_name("scc")
+    dn = build_computer_dn(name, base_dn)
+    request.addfinalizer(lambda: _cleanup(target, dn))
+
+    sh = LdapShell(target, extra_args=["--tls", "--insecure"])
+    try:
+        out = sh.cmd(f"createcomputer -cn {name}")
+        assert "Computer created" in out, out
+        assert dn.lower() in out.lower(), out
+    finally:
+        sh.close()

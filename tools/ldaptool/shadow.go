@@ -29,7 +29,8 @@ var helpShadowOptions = `
           --target     sAMAccountName of target account (required)
           --device-id  Device ID to remove (for 'remove' action)
           --out        Output PFX file path (default: <target>.pfx)
-          --pfx-pass   PFX file password (default: empty)
+          --pfx-pass   PFX file password (default: randomly generated)
+          --no-pfx-pass  Use an empty PFX password instead of generating one
 ` + helpConnectionOptions
 
 // Key Credential TLV entry types (MS-ADTS 2.2.20)
@@ -54,9 +55,10 @@ const windowsEpochDiff = 116444736000000000
 type shadowCredsCmd struct {
 	action   string
 	target   string
-	deviceID string
-	outFile  string
-	pfxPass  string
+	deviceID  string
+	outFile   string
+	pfxPass   string
+	noPfxPass bool
 }
 
 func init() { register(&shadowCredsCmd{}) }
@@ -70,7 +72,8 @@ func (c *shadowCredsCmd) DefineFlags(f *flag.FlagSet) {
 	f.StringVar(&c.target, "target", "", "sAMAccountName of target account (required)")
 	f.StringVar(&c.deviceID, "device-id", "", "Device ID to remove (for 'remove' action)")
 	f.StringVar(&c.outFile, "out", "", "Output PFX file path (default: <target>.pfx)")
-	f.StringVar(&c.pfxPass, "pfx-pass", "", "PFX file password")
+	f.StringVar(&c.pfxPass, "pfx-pass", "", "PFX file password (random if omitted)")
+	f.BoolVar(&c.noPfxPass, "no-pfx-pass", false, "Use an empty PFX password instead of generating one")
 }
 
 func (c *shadowCredsCmd) Run(a *connArgs) error {
@@ -91,7 +94,7 @@ func runShadowCredentials(conn *ldap.Conn, baseDN string, c *shadowCredsCmd) err
 	}
 	switch c.action {
 	case "add":
-		return shadowAdd(conn, baseDN, c.target, c.outFile, c.pfxPass)
+		return shadowAdd(conn, baseDN, c.target, c.outFile, c.pfxPass, c.noPfxPass)
 	case "list":
 		return shadowList(conn, baseDN, c.target)
 	case "remove":
@@ -348,7 +351,45 @@ func lookupTarget(conn *ldap.Conn, baseDN, samAccountName string) (string, []str
 	return dn, existing, nil
 }
 
-func shadowAdd(conn *ldap.Conn, baseDN, target, outFile, pfxPass string) error {
+// resolvePfxPass applies the PFX password precedence:
+//   1. an explicit --pfx-pass value wins
+//   2. --no-pfx-pass yields an empty password
+//   3. otherwise a password is randomly generated (the default)
+//
+// The returned bool reports whether the password was randomly generated so the
+// caller can flag it in the printout.
+func resolvePfxPass(pfxPass string, noPfxPass bool) (string, bool, error) {
+	if pfxPass != "" {
+		return pfxPass, false, nil
+	}
+	if noPfxPass {
+		return "", false, nil
+	}
+	generated, err := randomComputerPassword()
+	if err != nil {
+		return "", false, fmt.Errorf("PFX password generation: %w", err)
+	}
+	return generated, true, nil
+}
+
+// printPfxPass renders the "PFX pass:" line, showing (empty) when blank and
+// noting when the password was generated for the operator.
+func printPfxPass(printf func(string, ...any) (int, error), pass string, generated bool) {
+	switch {
+	case pass == "":
+		printf("  PFX pass:   (empty)\n")
+	case generated:
+		printf("  PFX pass:   %s (generated)\n", pass)
+	default:
+		printf("  PFX pass:   %s\n", pass)
+	}
+}
+
+func shadowAdd(conn *ldap.Conn, baseDN, target, outFile, pfxPass string, noPfxPass bool) error {
+	pass, generated, err := resolvePfxPass(pfxPass, noPfxPass)
+	if err != nil {
+		return err
+	}
 	dn, _, err := lookupTarget(conn, baseDN, target)
 	if err != nil {
 		return fmt.Errorf("target lookup: %w", err)
@@ -363,7 +404,7 @@ func shadowAdd(conn *ldap.Conn, baseDN, target, outFile, pfxPass string) error {
 	if err := conn.Modify(modReq); err != nil {
 		return fmt.Errorf("LDAP modify: %w", err)
 	}
-	pfxData, err := exportPFX(rand.Reader, key, cert, pfxPass)
+	pfxData, err := exportPFX(rand.Reader, key, cert, pass)
 	if err != nil {
 		return fmt.Errorf("PFX export: %w", err)
 	}
@@ -376,9 +417,7 @@ func shadowAdd(conn *ldap.Conn, baseDN, target, outFile, pfxPass string) error {
 	fmt.Printf("Shadow credential added to %s\n", dn)
 	fmt.Printf("  Device ID:  %s\n", deviceID.String())
 	fmt.Printf("  PFX file:   %s\n", outFile)
-	if pfxPass == "" {
-		fmt.Printf("  PFX pass:   (empty)\n")
-	}
+	printPfxPass(fmt.Printf, pass, generated)
 	return nil
 }
 

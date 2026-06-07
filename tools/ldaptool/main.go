@@ -8,14 +8,16 @@ import (
 	"fmt"
 	"net"
 	"os"
+	rundebug "runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jfjallid/gokrb5/v8/client"
-	krbconfig "github.com/jfjallid/gokrb5/v8/config"
-	"github.com/jfjallid/gokrb5/v8/credentials"
+	"github.com/jfjallid/gokrb5/v9/client"
+	krbconfig "github.com/jfjallid/gokrb5/v9/config"
+	"github.com/jfjallid/gokrb5/v9/credentials"
+	"github.com/jfjallid/gokrb5/v9/keytab"
 	"github.com/jfjallid/golog"
 	ldap "github.com/jfjallid/ldap/v3"
 	"github.com/jfjallid/ldap/v3/gssapi"
@@ -23,8 +25,8 @@ import (
 	"golang.org/x/term"
 )
 
-var logger = golog.Get("")
-var release string = "0.1.0"
+var logger = golog.Get("main")
+var release string = "0.2.0"
 var keyLogFile *os.File
 
 var helpConnectionOptions = `
@@ -50,6 +52,7 @@ var helpConnectionOptions = `
       -n, --no-pass              Send no password (unauthenticated NTLM bind)
           --simple               LDAP simple bind (DN/password)
           --anonymous            LDAP simple anonymous bind (no creds)
+          --keytab <file>        Load credentials from a keytab file
 
     Kerberos (with -k/--kerberos):
       -k, --kerberos             Use Kerberos (GSSAPI) instead of NTLM
@@ -58,9 +61,20 @@ var helpConnectionOptions = `
           --realm                Kerberos realm (defaults to upper-cased --domain)
           --aes-key              Hex AES128/256 key
           --override-spn         Service principal name (default: ldap/<host>)
-          --dc-ip <ip[:port]>    KDC address override (default port 88)
+          --dc-ip <ip[:port]>    KDC address override for Kerberos (default port 88)
+          --target-ip <ip>       IP to connect to for LDAP; skips DNS of --host
           --dns-host <ip[:port]> Override system's default DNS resolver (default port 53)
           --dns-tcp              Force DNS lookups over TCP
+
+    Diagnostics:
+          --debug                Enable debug logging. Bare --debug turns on every registered
+                                 package; --debug=ldap,smb turns on only the listed package-name
+                                 suffixes (the '=' form is required for the filter).
+          --verbose              Enable verbose output. Same filter syntax as --debug. --debug
+                                 and --verbose may be combined with different filters; a package
+                                 targeted by both gets the higher level.
+          --list-log-packages    List the registered log package names that can be targeted with
+                                 --debug=<suffix> or --verbose=<suffix>, then exit
 `
 
 type connArgs struct {
@@ -85,16 +99,48 @@ type connArgs struct {
 	useKerberos    bool
 	useSimple      bool
 	useAnonymous   bool
+	keytabPath     string
 	ccachePath     string
 	krb5conf       string
 	realm          string
 	aesKey         string
 	authSpn        string
 	dcIP           string
+	targetIP       string
 	dnsHost        string
 	dnsTCP         bool
-	debug          bool
-	verbose        bool
+	debug          logFlag
+	verbose        logFlag
+	listLog        bool
+}
+
+// logFlag is a comma-separated package-suffix filter that also remembers
+// whether the user passed the flag at all. IsBoolFlag is set so the bare
+// "--debug" and "--verbose" form parses (the flag pkg then calls Set("true"))
+// — we treat "true" as "no filter, all packages on". A filter list requires
+// the "=" form, e.g. --debug=ldap,smb, because IsBoolFlag stops the parser
+// from consuming the next positional token.
+type logFlag struct {
+	set    bool
+	values []string
+}
+
+func (d *logFlag) String() string { return strings.Join(d.values, ",") }
+
+func (d *logFlag) IsBoolFlag() bool { return true }
+
+func (d *logFlag) Set(s string) error {
+	d.set = true
+	d.values = nil
+	if s == "" || s == "true" {
+		return nil
+	}
+	for _, tok := range strings.Split(s, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			d.values = append(d.values, tok)
+		}
+	}
+	return nil
 }
 
 // Subcommand is the interface each ldaptool action implements.
@@ -130,6 +176,28 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 	return found
 }
 
+// argsRequestHelp reports whether a help flag (-h / -help / --help) appears
+// anywhere in the subcommand's arguments.
+//
+// We cannot rely on flag.Parse to surface this: Go's flag parser stops at the
+// first non-flag token, and a value-expecting flag used without a value (the
+// documented "-p with no value prompts for a password" form swallows the next
+// token as its value) leaves a stray operand that halts parsing. Either way a
+// trailing -h is silently dropped. Scanning the raw args first makes --help
+// work regardless of where it sits on the command line, for every subcommand.
+func argsRequestHelp(args []string) bool {
+	for _, a := range args {
+		if a == "--" {
+			break // POSIX end-of-flags terminator; the rest are operands
+		}
+		switch a {
+		case "-h", "-help", "--help":
+			return true
+		}
+	}
+	return false
+}
+
 func addConnectionArgs(f *flag.FlagSet, a *connArgs) {
 	f.StringVar(&a.host, "host", "", "DC hostname or IP (required)")
 	f.IntVar(&a.port, "port", 0, "LDAP port (default: 389 or 636 with --tls)")
@@ -158,16 +226,19 @@ func addConnectionArgs(f *flag.FlagSet, a *connArgs) {
 	f.BoolVar(&a.useKerberos, "k", false, "Use Kerberos (short)")
 	f.BoolVar(&a.useSimple, "simple", false, "Use LDAP simple bind (DN/password)")
 	f.BoolVar(&a.useAnonymous, "anonymous", false, "Use simple anonymous bind (no creds)")
+	f.StringVar(&a.keytabPath, "keytab", "", "Load credentials from a keytab file")
 	f.StringVar(&a.ccachePath, "ccache", "", "Kerberos credential cache file")
 	f.StringVar(&a.krb5conf, "krb5conf", "/etc/krb5.conf", "Path to krb5.conf")
 	f.StringVar(&a.realm, "realm", "", "Kerberos realm")
 	f.StringVar(&a.aesKey, "aes-key", "", "Hex AES128/256 key (Kerberos)")
 	f.StringVar(&a.authSpn, "override-spn", "", "Service principal name (default: ldap/<host>)")
-	f.StringVar(&a.dcIP, "dc-ip", "", "KDC address override (host[:port], default port 88)")
+	f.StringVar(&a.dcIP, "dc-ip", "", "KDC address override for Kerberos (host[:port], default port 88)")
+	f.StringVar(&a.targetIP, "target-ip", "", "IP to connect to for LDAP; skips DNS of --host")
 	f.StringVar(&a.dnsHost, "dns-host", "", "Override system DNS resolver (host[:port], default port 53)")
 	f.BoolVar(&a.dnsTCP, "dns-tcp", false, "Force DNS lookups over TCP")
-	f.BoolVar(&a.debug, "debug", false, "Enable debug logging")
-	f.BoolVar(&a.verbose, "verbose", false, "Enable verbose output")
+	f.Var(&a.debug, "debug", "Enable debug logging (optionally --debug=pkg,pkg)")
+	f.Var(&a.verbose, "verbose", "Enable verbose output (optionally --verbose=pkg,pkg)")
+	f.BoolVar(&a.listLog, "list-log-packages", false, "List registered log package names and exit")
 }
 
 func topLevelUsage() {
@@ -249,7 +320,17 @@ func resolvePort(args *connArgs) int {
 // in ldap.NewConn and run Start() / StartTLS().
 func dialLDAP(args *connArgs, tlsConf *tls.Config) (net.Conn, error) {
 	port := resolvePort(args)
-	addr := net.JoinHostPort(args.host, fmt.Sprintf("%d", port))
+	// --target-ip names the DC's IP so we can skip DNS resolution of --host
+	// (which is kept for the TLS ServerName and the Kerberos SPN). It may carry
+	// a port; strip it — the LDAP port comes from resolvePort.
+	dialHost := args.host
+	if args.targetIP != "" {
+		dialHost = args.targetIP
+		if h, _, err := net.SplitHostPort(dialHost); err == nil {
+			dialHost = h
+		}
+	}
+	addr := net.JoinHostPort(dialHost, fmt.Sprintf("%d", port))
 
 	timeout := args.timeout
 	if timeout <= 0 {
@@ -418,12 +499,47 @@ func explainBindError(args *connArgs, err error) error {
 	return err
 }
 
+// kdcRealmsForDCIP returns the set of realms to register the --dc-ip KDC under.
+// It includes the resolved client realm (used for the AS-REQ / TGT) and the
+// realm gokrb5 would derive from the target host's FQDN suffix when requesting
+// a service ticket (its suffix-strip heuristic: strip the first DNS label,
+// uppercase the rest). Registering both means the injected KDC is found whether
+// the lookup keys on the client realm or the service host's realm. Duplicates
+// are collapsed; entries are uppercased to match gokrb5's realm comparison.
+func kdcRealmsForDCIP(clientRealm, host string) []string {
+	var realms []string
+	seen := map[string]bool{}
+	add := func(r string) {
+		r = strings.ToUpper(strings.TrimSpace(r))
+		if r == "" || seen[r] {
+			return
+		}
+		seen[r] = true
+		realms = append(realms, r)
+	}
+
+	add(clientRealm)
+	// Mirror gokrb5's suffix-strip guess so the TGS-REQ for ldap/<host> finds
+	// the same KDC. net.SplitHostPort first in case --host carried a :port.
+	h := host
+	if hp, _, err := net.SplitHostPort(h); err == nil {
+		h = hp
+	}
+	// Skip the heuristic for IP literals — "10.0.0.1" has no realm suffix.
+	if net.ParseIP(h) == nil {
+		if i := strings.Index(h, "."); i > 0 && i < len(h)-1 {
+			add(h[i+1:])
+		}
+	}
+	return realms
+}
+
 // newKerberosClient picks the right gokrb5 client factory based on which of
 // --ccache, --aes-key, --hash, or --pass was supplied.
 //
 // The realm passed to gokrb5 falls back to upper-cased --domain, then to the
-// default_realm in krb5.conf. --dc-ip injects an explicit KDC entry for the
-// resolved realm so gokrb5's GetKDCs sees it before falling back to DNS SRV.
+// default_realm in krb5.conf. --dc-ip injects an explicit KDC entry so gokrb5's
+// GetKDCs sees it before falling back to DNS SRV.
 func newKerberosClient(args *connArgs) (*gssapi.Client, error) {
 	settings := []func(*client.Settings){client.DisablePAFXFAST(true)}
 
@@ -442,11 +558,22 @@ func newKerberosClient(args *connArgs) (*gssapi.Client, error) {
 		if !strings.Contains(addr, ":") {
 			addr = net.JoinHostPort(addr, "88")
 		}
-		// Appending wins because GetKDCs keeps the last matching realm entry.
-		cfg.Realms = append(cfg.Realms, krbconfig.Realm{
-			Realm: realm,
-			KDC:   []string{addr},
-		})
+		// Inject the KDC under every realm gokrb5 might look up while getting
+		// our service ticket. GetKDCs (and TGSExchange's sendToKDC) key on the
+		// realm, and that realm is *not* always our client realm: when getting
+		// a service ticket for ldap/<host>, gokrb5 derives the target realm
+		// from the SPN host (a [domain_realm] entry, else the uppercased host
+		// suffix). If we only registered the client realm, a TGS-REQ for a host
+		// in a different realm would miss our entry and gokrb5 would fall back
+		// to DNS SRV — resolving the FQDN over DNS, which is exactly what
+		// --dc-ip is meant to avoid. Appending wins because GetKDCs keeps the
+		// last matching realm entry.
+		for _, r := range kdcRealmsForDCIP(realm, args.host) {
+			cfg.Realms = append(cfg.Realms, krbconfig.Realm{
+				Realm: r,
+				KDC:   []string{addr},
+			})
+		}
 	}
 
 	// Try the ccache first if available; on failure, fall through to
@@ -462,6 +589,19 @@ func newKerberosClient(args *connArgs) (*gssapi.Client, error) {
 		logger.Errorf("ccache rejected (%v); falling back to direct credentials\n", err)
 	}
 
+	if args.keytabPath != "" {
+		kt, err := keytab.Load(args.keytabPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading keytab: %w", err)
+		}
+		kc, err := client.NewWithKeytab(args.user, realm, kt, cfg, settings...)
+		if err != nil {
+			return nil, fmt.Errorf("loading keytab client: %w", err)
+		}
+		logger.Noticef("Creating new kerberos client using keytab")
+		return gssapi.NewClient(kc)
+
+	}
 	if args.aesKey != "" {
 		keyBytes, err := hex.DecodeString(args.aesKey)
 		if err != nil {
@@ -643,7 +783,13 @@ func makeConnection(args *connArgs) (conn *ldap.Conn, baseDN string, err error) 
 }
 
 func promptPassword() (string, error) {
-	fmt.Printf("Enter password: ")
+	return promptSecret("Enter password: ")
+}
+
+// promptSecret prints label and reads a line from the terminal without echoing
+// it. Used for password input (bind password and set-password new/old values).
+func promptSecret(label string) (string, error) {
+	fmt.Printf("%s", label)
 	passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
 	fmt.Println()
 	if err != nil {
@@ -685,30 +831,61 @@ func ensurePassword(a *connArgs) error {
 	return nil
 }
 
-// applyLogLevel translates --debug / --verbose to a golog level and, in
-// debug mode, also flips the level on the noisy subpackages the shell would
-// otherwise silence.
-func applyLogLevel(a *connArgs) {
-	lvl := golog.LevelNotice
-	if a.debug {
-		lvl = golog.LevelDebug
-	} else if a.verbose {
-		lvl = golog.LevelInfo
+// applyLogLevel bumps registered package loggers to level. An empty filter
+// matches every name returned by golog.Names(); a non-empty filter keeps only
+// names whose path suffix matches one of the tokens (see matchesAny).
+func applyLogLevel(level int, filter []string) {
+	flags := golog.LstdFlags | golog.Lshortfile
+	for _, name := range golog.Names() {
+		if len(filter) == 0 || matchesAny(name, filter) {
+			golog.Set(name, "", level, flags, nil, nil)
+		}
 	}
-	logger.SetLogLevel(lvl)
-	logger.SetFlags(golog.LstdFlags|golog.Lshortfile)
-	if !a.debug {
-		return
+}
+
+// matchesAny reports whether name equals any token or ends with "/"+token,
+// so "smb" hits ".../go-smb/smb" but not ".../go-smb" (ends in "/go-smb",
+// not "/smb") and not ".../smb/server" (ends in "/server").
+func matchesAny(name string, tokens []string) bool {
+	for _, t := range tokens {
+		if name == t || strings.HasSuffix(name, "/"+t) {
+			return true
+		}
 	}
-	// Mirror the shell's explicit packages so --debug actually reaches them.
-	debugPackages := []struct{ pkg, name string }{
-		{"github.com/jfjallid/ldap/v3", "ldap"},
-		{"github.com/jfjallid/gokrb5/v8", "krb5"},
-		{"github.com/jfjallid/go-smb/ntlmssp", "ntlmssp"},
+	return false
+}
+
+// listLogPackages prints every registered log package name. The package
+// loggers register themselves at import time, so golog.Names() here lists
+// every logger this binary can target; the suffix of any of these names is
+// what --debug=/--verbose= matches.
+func listLogPackages() {
+	names := golog.Names()
+	sort.Strings(names)
+	fmt.Println("Registered log packages (target a name's suffix with --debug=<suffix> or --verbose=<suffix>):")
+	for _, name := range names {
+		fmt.Println(name)
 	}
-	for _, p := range debugPackages {
-		golog.Set(p.pkg, p.name, golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+}
+
+// configureLogging translates --debug / --verbose to golog levels. The two are
+// not mutually exclusive: each may carry its own comma-separated package filter
+// (e.g. --debug=ldap,smb --verbose=main). Verbose is applied first and debug
+// second so any package targeted by both ends up at the higher level
+// (LevelDebug > LevelInfo). A bare --debug or --verbose (empty filter) targets
+// every registered package, so passing both bare is ambiguous and rejected.
+func configureLogging(a *connArgs) bool {
+	if a.debug.set && a.verbose.set && len(a.debug.values) == 0 && len(a.verbose.values) == 0 {
+		fmt.Println("Cannot enable both --debug and --verbose for all packages at once. Specify just one of them, or be more granular e.g. --debug=ldap,smb --verbose=main")
+		return false
 	}
+	if a.verbose.set {
+		applyLogLevel(golog.LevelInfo, a.verbose.values)
+	}
+	if a.debug.set {
+		applyLogLevel(golog.LevelDebug, a.debug.values)
+	}
+	return true
 }
 
 func main() {
@@ -721,6 +898,11 @@ func main() {
 	switch os.Args[1] {
 	case "-v", "--version":
 		fmt.Printf("ldaptool version %s\n", release)
+		if bi, ok := rundebug.ReadBuildInfo(); ok {
+			for _, m := range bi.Deps {
+				fmt.Printf("Package: %s, Version: %s\n", m.Path, m.Version)
+			}
+		}
 		return
 	case "-h", "--help", "help":
 		topLevelUsage()
@@ -748,11 +930,26 @@ func main() {
 	sc.DefineFlags(fs)
 	addConnectionArgs(fs, args)
 
+	// Honour -h/--help wherever it appears. flag.Parse would miss it if a
+	// value-expecting flag (e.g. -p with no value) or a stray operand earlier
+	// on the line halted parsing before reaching it.
+	if argsRequestHelp(os.Args[2:]) {
+		fs.Usage()
+		return
+	}
+
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
 	}
 
-	applyLogLevel(args)
+	if args.listLog {
+		listLogPackages()
+		return
+	}
+
+	if !configureLogging(args) {
+		os.Exit(2)
+	}
 
 	if !isFlagSet(fs, "base-dn") {
 		args.discoverBaseDN = true

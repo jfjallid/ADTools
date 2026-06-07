@@ -110,22 +110,33 @@ LDAPTOOL_DRY_RUN=1 bash tests/ldaptool/scripts/cleanup.sh   # preview
 - **Tier 1 (36 cases)**: top-level help, `--version`, `--help` for every
   action, unknown-subcommand handling, `--host` requirement, `--ldif` /
   `--json` mutual exclusion, malformed `--scope` and `--preset`.
-- **Tier 2 read-only (25 cases)**: every search flag (filter, preset,
-  scope, attrs, output formats, paging, size limit, controls, banner,
-  out-file), `--naming-context` selection, `detect-signing`,
-  `detect-channel-binding`, `laps` (with and without `--target`).
-- **Tier 2 mutating (15 cases)**: `create-user` (with and without
-  password), `create-computer`, `modify` (--set/--add/--delete plus
-  `@file` indirection), `spn` (add/remove/replace), `group` (add/remove),
-  `rbcd` (add/list/remove/clear, by SID and by sAMAccountName),
-  `shadow-credentials` (add/list/remove/clear with PFX validation),
+- **Tier 2 read-only**: every search flag (filter, all 9 presets, scope,
+  attrs incl. operational-only, output formats, paging incl. `--page-size 0`,
+  size limit, banner, out-file, controls — `show-deleted`, `server-sort`
+  ascending/descending, multiple `--control`), `--naming-context`
+  selection, `detect-signing`, `detect-channel-binding` (TLS + StartTLS),
+  `laps` (with and without `--target`), `access` (full report, single
+  `--right`, `--show-token`).
+- **Tier 2 mutating**: `create-user` (no-pass, with password,
+  optional attrs, `--ou` custom container, post-create bind),
+  `create-computer` (default, `--password` + `--managed-by`,
+  post-create bind), `modify` (--set/--add/--delete + `@file`),
+  `spn` (add/remove/replace), `group` (user member, computer member
+  with and without `$`), `rbcd` (sAMAccountName/SID, computer trustee),
+  `shadow-credentials` (add/list/remove/clear with PFX validation,
+  `--pfx-pass`), `dacl` (read, add/remove an ACE, backup/restore),
+  `owner` (read/backup/set/restore round-trip, set by SID),
   `delete-object` (round-trip plus error paths).
-- **Tier 3 (16 cases)**: REPL help, `setbasedn`, `toggleverbose`,
-  `logout`, unknown command, `describe`, `search` (human/LDIF/JSON),
-  `createuser`, `deleteobject`, `modify`, `spn`, `group`, `rbcd`, `laps`.
-- **Tier 0 (8 cases)**: NTLM-pass, NTLM-hash, simple bind over TLS,
-  anonymous bind, Kerberos with password, Kerberos with AES key, LDAPS
-  baseline, StartTLS baseline.
+- **Tier 3**: REPL help, `setbasedn`, `toggleverbose`, `logout`,
+  unknown command, `describe`, `search` (human/LDIF/JSON), `createuser`,
+  `createcomputer`, `deleteobject`, `modify`, `spn` (add/replace/remove),
+  `group`, `rbcd`, `shadowcreds` (add/list/clear), `owner` (read/set),
+  `laps` (bare and
+  `-target`), connection lifecycle (`logout`+`connect`+`login`,
+  `login_krb`, `reconnect`, `tls`), tab completion (commands + `-attrs`).
+- **Tier 0**: NTLM-pass, NTLM password prompt, NTLM-hash, simple bind
+  over TLS, anonymous bind, Kerberos with password, Kerberos with AES
+  key, LDAPS baseline, StartTLS baseline.
 
 Cases that depend on optional env vars (NTHASH, AES_KEY) skip cleanly
 when those vars are unset.

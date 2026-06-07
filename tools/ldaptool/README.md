@@ -30,9 +30,12 @@ ldaptool --version
 | `delete-object`          | Delete an LDAP object by DN                                |
 | `create-user`            | Create a new user account                                  |
 | `create-computer`        | Create a new computer account                              |
+| `set-password`           | Set or change an account's password (`unicodePwd`)         |
 | `spn`                    | Manage `servicePrincipalName` on an object                 |
 | `shadow-credentials`     | Manage `msDS-KeyCredentialLink` (Shadow Credentials)       |
 | `rbcd`                   | Manage `msDS-AllowedToActOnBehalfOfOtherIdentity` (RBCD)   |
+| `dacl`                   | View and modify DACLs on object security descriptors       |
+| `access`                 | Compute a principal's effective access to an object        |
 | `group`                  | Add or remove group members                                |
 | `laps`                   | Read LAPS local-admin passwords                            |
 | `detect-signing`         | Detect if LDAP signing is required                         |
@@ -84,17 +87,19 @@ NTLM is used unless `--simple`, `--anonymous`, or `--kerberos` is given.
 | `--realm`        | Kerberos realm (defaults to upper-cased `--domain`)           |
 | `--aes-key`      | Hex AES128/256 key                                            |
 | `--override-spn` | Service principal name (default: `ldap/<host>`)               |
-| `--dc-ip`        | KDC address override (`host[:port]`, default port 88)         |
+| `--dc-ip`        | KDC address override for Kerberos (`host[:port]`, default port 88) |
+| `--target-ip`    | IP to connect to for LDAP; skips DNS resolution of `--host`   |
 | `--dns-host`     | Override system DNS resolver (`host[:port]`, default port 53) |
 | `--dns-tcp`      | Force DNS lookups over TCP                                    |
 
 ### Diagnostics
 
-| Flag            | Description            |
-| --------------- | ---------------------- |
-| `--debug`       | Enable debug logging   |
-| `--verbose`     | Enable verbose output  |
-| `-v, --version` | Print version and exit |
+| Flag                  | Description                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--debug`             | Enable debug logging. Bare `--debug` turns on every registered package; `--debug=ldap,smb` filters to the listed package-name suffixes (the `=` form is required). |
+| `--verbose`           | Enable verbose output. Same filter syntax as `--debug`; the two may be combined with different filters (a package targeted by both gets the higher level).    |
+| `--list-log-packages` | List the registered log package names targetable by `--debug=<suffix>` / `--verbose=<suffix>`, then exit                                                      |
+| `-v, --version`       | Print version and exit                                                                                                                                       |
 
 ## Subcommands
 
@@ -189,6 +194,39 @@ ldaptool create-computer --host dc.corp.local --tls -d CORP -u alice -p Passw0rd
     --cn pwn1
 ```
 
+### `set-password` — Set or change an account's password
+
+Writes `unicodePwd` on an existing account. The target may be a
+`sAMAccountName` or a full DN. Like the create actions, this needs a
+confidential connection (`--tls`, `--starttls`, or `--sasl seal`).
+
+| Flag             | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `--target`       | `sAMAccountName` or DN of the account (required)                         |
+| `--reset`        | Administrative reset (overwrite); needs only the new password            |
+| `--new-password` | New password (prompted if omitted)                                       |
+| `--old-password` | Current password, for a change (prompted if omitted unless `--reset`)    |
+
+The default mode is a **self-service change** (requires only the
+Change-Password right): you must prove the current password, and any of
+`--old-password` / `--new-password` not given on the command line is prompted
+for. Pass `--reset` for an **administrative reset** (requires the
+Reset-Password right), which overwrites the password and needs only the new
+one.
+
+```sh
+# Administrative reset (overwrite):
+ldaptool set-password --host dc.corp.local --tls -d CORP -u admin -p Passw0rd! \
+    --reset --target victim --new-password 'NewP@ss1!'
+
+# Self-service change (prompts for the current and new password):
+ldaptool set-password --host dc.corp.local --tls -d CORP -u victim -p - \
+    --target victim
+```
+
+In the interactive shell the command is `setpassword` (same flags with single
+dashes, e.g. `setpassword -reset -target victim -newpass 'NewP@ss1!'`).
+
 ### `spn` — Manage `servicePrincipalName`
 
 | Flag        | Description                                         |
@@ -211,7 +249,8 @@ ldaptool spn --host dc.corp.local -d CORP -u alice -p Passw0rd! \
 | `--target`    | `sAMAccountName` of target account (required)     |
 | `--device-id` | Device ID to remove (for `remove` action)         |
 | `--out`       | Output PFX file path (default: `<target>.pfx`)    |
-| `--pfx-pass`  | PFX file password (default: empty)                |
+| `--pfx-pass`  | PFX file password (default: randomly generated)   |
+| `--no-pfx-pass` | Use an empty PFX password instead of generating one |
 
 `add` generates an RSA key pair and self-signed certificate, links it to the
 target account, and exports a PFX usable for PKINIT.
@@ -234,6 +273,87 @@ Edits the target's `msDS-AllowedToActOnBehalfOfOtherIdentity` attribute.
 ```sh
 ldaptool rbcd --host dc.corp.local -d CORP -u alice -p Passw0rd! \
     --action add --target 'victim$' --trustee 'attacker$'
+```
+
+### `dacl` — View and modify object DACLs
+
+Reads and edits the discretionary ACL (DACL) of an object's `nTSecurityDescriptor`.
+Permissions are translated to friendly names; object ACEs (extended rights such
+as DCSync and ResetPassword, and per-property writes) are fully supported.
+
+| Flag                      | Description                                                                 |
+| ------------------------- | --------------------------------------------------------------------------- |
+| `--action`                | `read` \| `add` \| `remove` \| `backup` \| `restore` (required)             |
+| `--target`                | Object to operate on: `sAMAccountName`, DN, or SID (required)               |
+| `--trustee`               | Principal the ACE applies to: `sAMAccountName`, DN, or SID (add/remove)      |
+| `--rights`                | Named preset (repeatable): `FullControl`, `DCSync`, `ResetPassword`, `WriteMembers`, `AllExtendedRights`, `WriteDacl`, `WriteOwner` |
+| `--mask`                  | Raw `ACCESS_MASK`, hex (`0x..`) or decimal                                  |
+| `--right-guid`            | Extended-right/property GUID for an object ACE (repeatable)                 |
+| `--ace-type`              | `allowed` or `denied` (default `allowed`)                                   |
+| `--inheritance`           | Set `CONTAINER_INHERIT_ACE` on added ACEs                                   |
+| `--inherited-object-guid` | `INHERITED_OBJECT_TYPE` GUID (implies an object ACE)                        |
+| `--resolve-sids`          | Resolve SIDs to names in `read` output                                      |
+| `--file`                  | File path for `backup`/`restore` (base64 of the raw descriptor)             |
+
+Reads request `OWNER|GROUP|DACL` via the SD-flags control (no `SeSecurityPrivilege`
+needed); writes are scoped to the DACL so owner/group/SACL are left untouched.
+When the target is the domain object itself, `read` also flags any principal
+whose ACEs effectively grant DCSync (the replication rights only apply there).
+
+```sh
+# View a DACL with permissions and SIDs resolved
+ldaptool dacl --host dc.corp.local -d CORP -u alice -p Passw0rd! \
+    --action read --target krbtgt --resolve-sids
+
+# Grant a principal DCSync on the domain
+ldaptool dacl --host dc.corp.local -d CORP -u alice -p Passw0rd! \
+    --action add --target CORP --trustee attacker --rights DCSync
+
+# Grant ResetPassword over a user, then remove just that ACE
+ldaptool dacl ... --action add    --target bob --trustee attacker --rights ResetPassword
+ldaptool dacl ... --action remove --target bob --trustee attacker --rights ResetPassword
+```
+
+### `access` — Compute a principal's effective access
+
+Answers "what can this security principal actually do to this object?" — the
+equivalent of the Windows *Advanced Security Settings → Effective Access* tab.
+It builds the principal's token (its own SID plus the full transitive set of
+group SIDs the DC reports via the `tokenGroups` constructed attribute — nested
+groups, primary group, and `sIDHistory` — plus the assumed session SIDs), then
+runs the canonical NT access check against the target's (already
+inheritance-flattened) DACL and maps the result to friendly rights. Object
+ownership's implicit `READ_CONTROL`/`WRITE_DAC` is accounted for (and the
+`OWNER_RIGHTS` override honoured).
+
+| Flag                | Description                                                                  |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `--target`          | Object to evaluate: `sAMAccountName`, DN, or SID (required)                   |
+| `--principal`       | Security principal to evaluate: `sAMAccountName`, DN, or SID (required)       |
+| `--right`           | Ask only about a specific right (repeatable); default prints a full report   |
+| `--no-session-sids` | Do not assume `Everyone` / `Authenticated Users` / `This Organization`       |
+| `--show-token`      | Print the expanded SID set used for the check                                |
+
+`--right` accepts a preset (`FullControl`, `DCSync`, `ResetPassword`, …), a
+mask-bit name (`WriteProperty`, `WriteDacl`, `GenericAll`, …), an extended-right
+or property GUID, or `write:<attr>` / `read:<attr>` (attribute
+`lDAPDisplayName` or GUID). A bare attribute name reports **both** read and
+write.
+
+Limitations mirror the Windows tab itself: privileges (`SeBackup`/`SeRestore`/
+`SeTakeOwnership`), logon-type SIDs, and conditional/claims ACEs are not
+modelled; property-*set* ACEs are reported by set without member expansion.
+
+```sh
+# Full effective-access report for a principal on a DC object
+ldaptool access --host dc.corp.local -d CORP -u alice -p Passw0rd! \
+    --target dc01 --principal helpdesk
+
+# Single question: can 'bob' write the SPN attribute on dc01 (direct or via groups)?
+ldaptool access ... --target dc01 --principal bob --right write:servicePrincipalName
+
+# Can 'bob' DCSync the domain?
+ldaptool access ... --target CORP --principal bob --right dcsync
 ```
 
 ### `group` — Add or remove group members
@@ -323,6 +443,8 @@ ldaptool shell --host dc.corp.local -d CORP -u alice -p Passw0rd!
 | `spn`              | Manage `servicePrincipalName`                                |
 | `shadowcreds`      | Manage `msDS-KeyCredentialLink`                              |
 | `rbcd`             | Manage RBCD                                                  |
+| `dacl`             | View and modify object DACLs                                 |
+| `access`           | Compute a principal's effective access to an object         |
 | `group`            | Add or remove group members                                  |
 | `laps`             | Read LAPS passwords                                          |
 | `exit`             | Leave the shell                                              |

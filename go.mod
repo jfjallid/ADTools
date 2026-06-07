@@ -4,12 +4,13 @@ go 1.26.1
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/jfjallid/go-smb v0.8.2
-	github.com/jfjallid/gokrb5/v8 v8.6.2
-	github.com/jfjallid/golog v0.3.5
-	github.com/jfjallid/ldap/v3 v3.100.0
+	github.com/jfjallid/go-smb v0.10.0
+	github.com/jfjallid/gokrb5/v9 v9.0.0
+	github.com/jfjallid/golog v0.3.6
+	github.com/jfjallid/ldap/v3 v3.101.0
 	golang.org/x/net v0.53.0
 	golang.org/x/term v0.42.0
+	gopkg.in/yaml.v3 v3.0.1
 	software.sslmate.com/src/go-pkcs12 v0.7.0
 )
 

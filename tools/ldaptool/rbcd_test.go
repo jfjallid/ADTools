@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -56,5 +59,43 @@ func TestDecodeRBCDEmpty(t *testing.T) {
 func TestEncodeRBCDRequiresTrustee(t *testing.T) {
 	if _, err := encodeRBCD(nil); err == nil {
 		t.Error("expected error when no trustees supplied")
+	}
+}
+
+func TestFormatRBCDDryRunHex(t *testing.T) {
+	sid := "S-1-5-21-1004336348-1177238915-682003330-1107"
+	blob, err := encodeRBCD([]string{sid})
+	if err != nil {
+		t.Fatalf("encodeRBCD: %v", err)
+	}
+
+	var buf bytes.Buffer
+	dn := "CN=victim,CN=Computers,DC=corp,DC=local"
+	formatRBCDDryRun(
+		&buf,
+		dn,
+		"victim$", // sAMAccountName as the user might pass it
+		[]string{"attacker"},
+		[]string{sid},
+		blob,
+		[]string{sid},
+	)
+	got := buf.String()
+
+	wantHex := hex.EncodeToString(blob)
+	if !strings.Contains(got, wantHex) {
+		t.Errorf("output missing raw hex string\n--- output ---\n%s\n--- want hex ---\n%s", got, wantHex)
+	}
+	// Self-relative SD with SE_DACL_PRESENT|SE_SELF_RELATIVE → control 0x8004,
+	// little-endian after revision/sbz: 0x01 0x00 0x04 0x80.
+	if !strings.Contains(got, "[byte[]]@(0x01,0x00,0x04,0x80") {
+		t.Errorf("output missing PowerShell header prefix\n--- output ---\n%s", got)
+	}
+	if !strings.Contains(got, dn) {
+		t.Errorf("output missing target DN\n--- output ---\n%s", got)
+	}
+	// -Identity should strip the trailing $ from the sAMAccountName.
+	if !strings.Contains(got, "Set-ADComputer -Identity 'victim'") {
+		t.Errorf("output missing Set-ADComputer line with stripped $\n--- output ---\n%s", got)
 	}
 }

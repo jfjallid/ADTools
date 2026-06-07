@@ -106,3 +106,99 @@ def test_create_user_with_optional_attrs(
 
     found = find_dn_by_sam(target, name)
     assert found is not None
+
+
+def test_create_user_custom_ou(
+    target: Target,
+    base_dn: str,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+) -> None:
+    """`--ou <full-dn>` places the new user under a non-default container.
+
+    Uses CN=Managed Service Accounts (present by default since AD 2008 R2).
+    Skips if that container is missing on the lab DC.
+    """
+    msa_container = f"CN=Managed Service Accounts,{base_dn}"
+    probe = run([
+        "search",
+        *target.common_argv(),
+        "--search-base", msa_container,
+        "--scope", "base",
+        "--filter", "(objectClass=*)",
+        "--attrs", "objectClass",
+        "--no-banner",
+    ])
+    if "Found 1 entry" not in probe.combined:
+        pytest.skip(f"{msa_container} not present on lab DC")
+
+    name = ldaptest_name("ou")
+    expected_dn = f"CN={name},{msa_container}"
+    request.addfinalizer(lambda: _cleanup(target, expected_dn))
+
+    result = run([
+        "create-user",
+        *target.common_argv(),
+        "--cn", name,
+        "--sam", name,
+        "--ou", msa_container,
+    ])
+    assert_call_succeeded(result)
+    assert_contains(result, "User created")
+    assert_contains(result, expected_dn)
+
+    # Confirm via search that the user lives where --ou said.
+    found = find_dn_by_sam(target, name)
+    assert found is not None
+    assert found.lower() == expected_dn.lower(), (
+        f"expected {expected_dn!r}, got {found!r}"
+    )
+
+
+def test_created_user_can_authenticate(
+    target: Target,
+    base_dn: str,
+    ldaps_available: None,
+    ldaptest_name: Callable[[str], str],
+    request: pytest.FixtureRequest,
+) -> None:
+    """Round-trip: create an enabled user, then bind as that user.
+
+    Verifies `--user-password` actually sets unicodePwd to the supplied
+    value (not just that the create call succeeded).
+    """
+    name = ldaptest_name("rtpw")
+    dn = build_user_dn(name, base_dn)
+    request.addfinalizer(lambda: _cleanup(target, dn))
+
+    password = "RoundTripP@ss1!"
+    create = run([
+        "create-user",
+        *target.common_argv(),
+        "--tls",
+        "--insecure",
+        "--cn", name,
+        "--sam", name,
+        "--user-password", password,
+        "--enabled",
+    ])
+    assert_call_succeeded(create)
+
+    # Re-bind as the new user with the password we just set.
+    bind_check = run([
+        "search",
+        "--host", target.host,
+        "--tls",
+        "--insecure",
+        "--user", name,
+        "--pass", password,
+        "--domain", target.domain,
+        *( ["--dc-ip", target.dc_ip] if target.dc_ip else [] ),
+        "--scope", "base",
+        "--search-base", "",
+        "--filter", "(objectClass=*)",
+        "--attrs", "dnsHostName",
+        "--no-banner",
+    ])
+    assert_call_succeeded(bind_check)
+    assert_contains(bind_check, "Found 1 entry")

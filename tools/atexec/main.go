@@ -31,6 +31,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -49,8 +50,8 @@ import (
 )
 
 var (
-	log            = golog.Get("")
-	release string = "0.1.0"
+	log            = golog.Get("main")
+	release string = "0.1.1"
 )
 
 var helpMsg = `
@@ -79,10 +80,104 @@ var helpMsg = `
           --socks-port <port>      SOCKS5 proxy port (default 1080)
           --noenc                  Disable smb encryption
           --smb2                   Force smb 2.1
-          --debug                  Enable debug logging
-          --verbose                Enable verbose logging
+          --debug                  Enable debug logging. Bare --debug turns on every
+                                   registered package; --debug=smb,dcerpc turns on only the
+                                   listed package-name suffixes (the '=' form is required
+                                   for the filter).
+          --verbose                Enable verbose logging. Same filter syntax as --debug.
+                                   --debug and --verbose may be combined with different
+                                   filters; a package targeted by both gets the higher level.
+          --list-log-packages      List the registered log package names that can be
+                                   targeted with --debug=<suffix> or --verbose=<suffix>,
+                                   then exit
       -v, --version                Show version
 `
+
+// logFlag is a comma-separated package-suffix filter that also remembers
+// whether the user passed the flag at all. IsBoolFlag is set so the bare
+// "--debug" and "--verbose" form parses (the flag pkg then calls Set("true"))
+// — we treat "true" as "no filter, all packages on". A filter list requires
+// the "=" form, e.g. --debug=smb,dcerpc, because IsBoolFlag stops the parser
+// from consuming the next positional token.
+type logFlag struct {
+	set    bool
+	values []string
+}
+
+func (d *logFlag) String() string { return strings.Join(d.values, ",") }
+
+func (d *logFlag) IsBoolFlag() bool { return true }
+
+func (d *logFlag) Set(s string) error {
+	d.set = true
+	d.values = nil
+	if s == "" || s == "true" {
+		return nil
+	}
+	for _, tok := range strings.Split(s, ",") {
+		if tok = strings.TrimSpace(tok); tok != "" {
+			d.values = append(d.values, tok)
+		}
+	}
+	return nil
+}
+
+// applyLogLevel bumps registered package loggers to level. An empty filter
+// matches every name returned by golog.Names(); a non-empty filter keeps only
+// names whose path suffix matches one of the tokens (see matchesAny).
+func applyLogLevel(level int, filter []string) {
+	flags := golog.LstdFlags | golog.Lshortfile
+	for _, name := range golog.Names() {
+		if len(filter) == 0 || matchesAny(name, filter) {
+			golog.Set(name, "", level, flags, nil, nil)
+		}
+	}
+}
+
+// matchesAny reports whether name equals any token or ends with "/"+token,
+// so "smb" hits ".../go-smb/smb" but not ".../go-smb" (ends in "/go-smb",
+// not "/smb") and not ".../smb/server" (ends in "/server").
+func matchesAny(name string, tokens []string) bool {
+	for _, t := range tokens {
+		if name == t || strings.HasSuffix(name, "/"+t) {
+			return true
+		}
+	}
+	return false
+}
+
+// listLogPackages prints every registered log package name. The package
+// loggers register themselves at import time, so golog.Names() here lists
+// every logger this binary can target; the suffix of any of these names is
+// what --debug=/--verbose= matches.
+func listLogPackages() {
+	names := golog.Names()
+	sort.Strings(names)
+	fmt.Println("Registered log packages (target a name's suffix with --debug=<suffix> or --verbose=<suffix>):")
+	for _, name := range names {
+		fmt.Println(name)
+	}
+}
+
+// configureLogging applies the --debug / --verbose filters. The two are not
+// mutually exclusive: each may carry its own comma-separated package filter
+// (e.g. --debug=smb,dcerpc --verbose=main). Verbose is applied first and debug
+// second so any package targeted by both ends up at the higher level
+// (LevelDebug > LevelInfo). A bare --debug or --verbose (empty filter) targets
+// every registered package, so passing both bare is ambiguous and rejected.
+func configureLogging(debug, verbose logFlag) bool {
+	if debug.set && verbose.set && len(debug.values) == 0 && len(verbose.values) == 0 {
+		fmt.Println("Cannot enable both --debug and --verbose for all packages at once. Specify just one of them, or be more granular e.g. --debug=smb,dcerpc --verbose=main")
+		return false
+	}
+	if verbose.set {
+		applyLogLevel(golog.LevelInfo, verbose.values)
+	}
+	if debug.set {
+		applyLogLevel(golog.LevelDebug, debug.values)
+	}
+	return true
+}
 
 func isFlagSet(name string) bool {
 	found := false
@@ -117,7 +212,8 @@ func randomTaskName() string {
 func main() {
 	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, command, cmdArgs string
 	var port, socksPort int
-	var debug, localUser, forceSMB2, version, verbose, noPass, kerberos, dnsTCP, noenc, noDelete bool
+	var localUser, forceSMB2, version, noPass, kerberos, dnsTCP, noenc, noDelete, listLog bool
+	var debug, verbose logFlag
 	var err error
 	var dialTimeout time.Duration
 	var dialSocksProxy proxy.Dialer
@@ -137,8 +233,9 @@ func main() {
 	flag.StringVar(&domain, "domain", "", "")
 	flag.IntVar(&port, "P", 445, "")
 	flag.IntVar(&port, "port", 445, "")
-	flag.BoolVar(&debug, "debug", false, "")
-	flag.BoolVar(&verbose, "verbose", false, "")
+	flag.Var(&debug, "debug", "")
+	flag.Var(&verbose, "verbose", "")
+	flag.BoolVar(&listLog, "list-log-packages", false, "")
 	flag.BoolVar(&localUser, "local", false, "")
 	flag.DurationVar(&dialTimeout, "t", 5*time.Second, "")
 	flag.DurationVar(&dialTimeout, "timeout", 5*time.Second, "")
@@ -165,31 +262,13 @@ func main() {
 
 	flag.Parse()
 
-	if debug {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mstsch", "mstsch", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/gokrb5/v8", "gokrb5", golog.LevelDebug, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetFlags(golog.LstdFlags | golog.Lshortfile)
-		log.SetLogLevel(golog.LevelDebug)
-	} else if verbose {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mstsch", "mstsch", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelInfo, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		log.SetLogLevel(golog.LevelInfo)
-	} else {
-		golog.Set("github.com/jfjallid/go-smb/spnego", "spnego", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/gss", "gss", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc", "dcerpc", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/krb5ssp", "krb5ssp", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/dcerpc/mstsch", "mstsch", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
-		golog.Set("github.com/jfjallid/go-smb/smb", "smb", golog.LevelNotice, golog.LstdFlags|golog.Lshortfile, golog.DefaultOutput, golog.DefaultErrOutput)
+	if listLog {
+		listLogPackages()
+		return
+	}
+
+	if !configureLogging(debug, verbose) {
+		return
 	}
 
 	if version {
@@ -372,17 +451,17 @@ func main() {
 
 	smbMech := newMech()
 	smbOpts := smb.Options{
-		Host:        targetIP,
-		Port:        port,
-		Domain:      domain,
-		User:        username,
-		Password:    password,
-		Hash:        hash,
-		ForceSMB2:   forceSMB2,
-		DialTimeout: dialTimeout,
-		ProxyDialer: dialSocksProxy,
+		Host:              targetIP,
+		Port:              port,
+		Domain:            domain,
+		User:              username,
+		Password:          password,
+		Hash:              hash,
+		ForceSMB2:         forceSMB2,
+		DialTimeout:       dialTimeout,
+		ProxyDialer:       dialSocksProxy,
 		DisableEncryption: noenc,
-		Initiator:   smbMech,
+		Initiator:         smbMech,
 	}
 	conn, err := smb.NewConnection(smbOpts)
 	if err != nil {
@@ -395,7 +474,7 @@ func main() {
 	} else {
 		log.Noticeln("[+] Signing is NOT required")
 	}
-	
+
 	if conn.IsAuthenticated() {
 		log.Noticef("[+] Login successful as %s\n", conn.GetAuthUsername())
 	} else {
