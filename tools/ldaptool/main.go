@@ -26,7 +26,7 @@ import (
 )
 
 var logger = golog.Get("main")
-var release string = "0.2.0"
+var release string = "0.2.1"
 var keyLogFile *os.File
 
 var helpConnectionOptions = `
@@ -47,12 +47,11 @@ var helpConnectionOptions = `
     Authentication (NTLM unless --simple/--anonymous/--kerberos):
       -d, --domain               AD domain (e.g. CORP)
       -u, --user                 Username (or full DN with --simple)
-      -p, --pass                 Password (or set AD_PASSWORD env var)
+      -p, --pass                 Password (bare -p prompts on terminal)
           --hash                 NT hash (pass-the-hash / Kerberos RC4)
       -n, --no-pass              Send no password (unauthenticated NTLM bind)
           --simple               LDAP simple bind (DN/password)
           --anonymous            LDAP simple anonymous bind (no creds)
-          --keytab <file>        Load credentials from a keytab file
 
     Kerberos (with -k/--kerberos):
       -k, --kerberos             Use Kerberos (GSSAPI) instead of NTLM
@@ -60,6 +59,9 @@ var helpConnectionOptions = `
           --krb5conf             Path to krb5.conf (default: /etc/krb5.conf)
           --realm                Kerberos realm (defaults to upper-cased --domain)
           --aes-key              Hex AES128/256 key
+          --keytab-file <file>   Authenticate with a Kerberos keytab (implies -k;
+                                 principal and realm default to the keytab's first
+                                 entry, overridable with --user and --realm/--domain)
           --override-spn         Service principal name (default: ldap/<host>)
           --dc-ip <ip[:port]>    KDC address override for Kerberos (default port 88)
           --target-ip <ip>       IP to connect to for LDAP; skips DNS of --host
@@ -217,7 +219,7 @@ func addConnectionArgs(f *flag.FlagSet, a *connArgs) {
 	f.StringVar(&a.domain, "d", "", "AD domain (short)")
 	f.StringVar(&a.user, "user", "", "Username")
 	f.StringVar(&a.user, "u", "", "Username (short)")
-	f.StringVar(&a.pass, "pass", "", "Password (or set AD_PASSWORD env var)")
+	f.StringVar(&a.pass, "pass", "", "Password (bare -p prompts on terminal)")
 	f.StringVar(&a.pass, "p", "", "Password (short)")
 	f.StringVar(&a.hash, "hash", "", "NT hash (pass-the-hash / Kerberos RC4)")
 	f.BoolVar(&a.noPass, "no-pass", false, "Send no password (unauthenticated NTLM bind)")
@@ -226,7 +228,7 @@ func addConnectionArgs(f *flag.FlagSet, a *connArgs) {
 	f.BoolVar(&a.useKerberos, "k", false, "Use Kerberos (short)")
 	f.BoolVar(&a.useSimple, "simple", false, "Use LDAP simple bind (DN/password)")
 	f.BoolVar(&a.useAnonymous, "anonymous", false, "Use simple anonymous bind (no creds)")
-	f.StringVar(&a.keytabPath, "keytab", "", "Load credentials from a keytab file")
+	f.StringVar(&a.keytabPath, "keytab-file", "", "Load credentials from a keytab file")
 	f.StringVar(&a.ccachePath, "ccache", "", "Kerberos credential cache file")
 	f.StringVar(&a.krb5conf, "krb5conf", "/etc/krb5.conf", "Path to krb5.conf")
 	f.StringVar(&a.realm, "realm", "", "Kerberos realm")
@@ -548,6 +550,29 @@ func newKerberosClient(args *connArgs) (*gssapi.Client, error) {
 		return nil, fmt.Errorf("loading krb5.conf: %w", err)
 	}
 
+	// A keytab is a self-describing credential: its entries carry the principal
+	// and realm. When --keytab-file is supplied without --user (and without a realm
+	// from --realm/--domain), derive the login identity from the keytab's first
+	// entry, mirroring how kerbtool treats a keytab. Explicit flags still win.
+	// The loaded keytab is reused by the auth block below so it is read once.
+	var ktForAuth *keytab.Keytab
+	if args.keytabPath != "" {
+		ktForAuth, err = keytab.Load(args.keytabPath)
+		if err != nil {
+			return nil, fmt.Errorf("loading keytab: %w", err)
+		}
+		pn, ktRealm, perr := ktForAuth.Principal()
+		if perr != nil {
+			return nil, fmt.Errorf("keytab %s: %w", args.keytabPath, perr)
+		}
+		if args.user == "" {
+			args.user = strings.Join(pn.NameString, "/")
+		}
+		if args.realm == "" && args.domain == "" {
+			args.realm = ktRealm
+		}
+	}
+
 	realm, err := resolveKerberosRealm(args, cfg)
 	if err != nil {
 		return nil, err
@@ -590,17 +615,15 @@ func newKerberosClient(args *connArgs) (*gssapi.Client, error) {
 	}
 
 	if args.keytabPath != "" {
-		kt, err := keytab.Load(args.keytabPath)
-		if err != nil {
-			return nil, fmt.Errorf("loading keytab: %w", err)
+		if args.user == "" {
+			return nil, fmt.Errorf("keytab %s has no principal to authenticate as; specify --user", args.keytabPath)
 		}
-		kc, err := client.NewWithKeytab(args.user, realm, kt, cfg, settings...)
+		kc, err := client.NewWithKeytab(args.user, realm, ktForAuth, cfg, settings...)
 		if err != nil {
 			return nil, fmt.Errorf("loading keytab client: %w", err)
 		}
-		logger.Noticef("Creating new kerberos client using keytab")
+		logger.Noticef("Creating new kerberos client using keytab as %s@%s", args.user, realm)
 		return gssapi.NewClient(kc)
-
 	}
 	if args.aesKey != "" {
 		keyBytes, err := hex.DecodeString(args.aesKey)
@@ -666,7 +689,7 @@ func newCcacheClient(args *connArgs, cfg *krbconfig.Config, settings []func(*cli
 // credential we can retry the bind with. An empty password counts as "no
 // fallback" — we don't want to silently try an empty AS-REQ.
 func hasFallbackCred(a *connArgs) bool {
-	return a.aesKey != "" || a.hash != "" || a.pass != ""
+	return a.aesKey != "" || a.hash != "" || a.pass != "" || a.keytabPath != ""
 }
 
 // resolveKerberosRealm picks the realm in priority order: --realm,
@@ -798,28 +821,19 @@ func promptSecret(label string) (string, error) {
 	return string(passBytes), nil
 }
 
-// ensurePassword fills args.pass from AD_PASSWORD or a terminal prompt when
-// the active auth mode requires one. It is a no-op when --anonymous,
-// --no-pass, --hash, or --aes-key obviates the need for a cleartext password.
+// ensurePassword fills args.pass from a terminal prompt when the active auth
+// mode requires one. It is a no-op when --anonymous, --no-pass, --hash, or
+// --aes-key obviates the need for a cleartext password.
 //
 // When a Kerberos ccache is in play we don't prompt — the ccache is the
-// primary credential — but we still pick up AD_PASSWORD as a passive
-// fallback so newKerberosClient can retry with a password if the ccache
-// has no usable ticket.
+// primary credential.
 func ensurePassword(a *connArgs) error {
-	if a.useAnonymous || a.noPass || a.hash != "" || a.aesKey != "" {
+	if a.useAnonymous || a.noPass || a.hash != "" || a.aesKey != "" || a.keytabPath != "" {
 		return nil
 	}
 	if a.useKerberos && a.ccachePath != "" {
-		if a.pass == "" {
-			a.pass = os.Getenv("AD_PASSWORD")
-		}
 		return nil
 	}
-	if a.pass != "" {
-		return nil
-	}
-	a.pass = os.Getenv("AD_PASSWORD")
 	if a.pass != "" {
 		return nil
 	}
@@ -955,7 +969,17 @@ func main() {
 		args.discoverBaseDN = true
 	}
 
-	if args.useKerberos && args.ccachePath == "" {
+	// A keytab is a Kerberos credential, so --keytab-file selects Kerberos without
+	// requiring a separate -k (matching kerbtool, where the keytab is just a
+	// credential source).
+	if args.keytabPath != "" {
+		args.useKerberos = true
+	}
+
+	// Fall back to the ambient ccache only when no other Kerberos credential was
+	// explicitly named; an explicit --keytab-file must not be shadowed by a stale
+	// KRB5CCNAME in the environment.
+	if args.useKerberos && args.ccachePath == "" && args.keytabPath == "" {
 		if cc := os.Getenv("KRB5CCNAME"); cc != "" {
 			args.ccachePath = strings.TrimPrefix(cc, "FILE:")
 			logger.Debugf("Using ccache from KRB5CCNAME: %s\n", args.ccachePath)
@@ -1010,8 +1034,8 @@ type detectSigningCmd struct{}
 
 func init() { register(&detectSigningCmd{}) }
 
-func (c *detectSigningCmd) Name() string              { return "detect-signing" }
-func (c *detectSigningCmd) Synopsis() string          { return "Detect if LDAP signing is required" }
+func (c *detectSigningCmd) Name() string                 { return "detect-signing" }
+func (c *detectSigningCmd) Synopsis() string             { return "Detect if LDAP signing is required" }
 func (c *detectSigningCmd) DefineFlags(fs *flag.FlagSet) {}
 func (c *detectSigningCmd) Usage() string {
 	return `
@@ -1106,8 +1130,8 @@ type detectCBCmd struct{}
 
 func init() { register(&detectCBCmd{}) }
 
-func (c *detectCBCmd) Name() string              { return "detect-channel-binding" }
-func (c *detectCBCmd) Synopsis() string          { return "Detect if LDAP channel binding is required" }
+func (c *detectCBCmd) Name() string                 { return "detect-channel-binding" }
+func (c *detectCBCmd) Synopsis() string             { return "Detect if LDAP channel binding is required" }
 func (c *detectCBCmd) DefineFlags(fs *flag.FlagSet) {}
 func (c *detectCBCmd) Usage() string {
 	return `
@@ -1203,14 +1227,14 @@ func (c *detectCBCmd) Run(a *connArgs) error {
 
 // ---- shell subcommand -----------------------------------------------------
 
-type shellCmd struct{
+type shellCmd struct {
 	noHistory bool
 }
 
 func init() { register(&shellCmd{}) }
 
-func (c *shellCmd) Name() string              { return "shell" }
-func (c *shellCmd) Synopsis() string          { return "Launch interactive shell" }
+func (c *shellCmd) Name() string     { return "shell" }
+func (c *shellCmd) Synopsis() string { return "Launch interactive shell" }
 func (c *shellCmd) DefineFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&c.noHistory, "no-history", false, "Disable command history file")
 }

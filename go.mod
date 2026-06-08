@@ -4,7 +4,7 @@ go 1.26.1
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/jfjallid/go-smb v0.10.0
+	github.com/jfjallid/go-smb v0.10.1
 	github.com/jfjallid/gokrb5/v9 v9.0.0
 	github.com/jfjallid/golog v0.3.6
 	github.com/jfjallid/ldap/v3 v3.101.0

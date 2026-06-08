@@ -11,8 +11,6 @@ gracefully reports which modes are exercisable on the current target.
 
 from __future__ import annotations
 
-import os
-
 import pexpect
 import pytest
 
@@ -55,7 +53,7 @@ def test_ntlm_password(target: Target) -> None:
 
 
 def test_ntlm_password_prompt(target: Target) -> None:
-    """No `--pass`/`-n`/`AD_PASSWORD` → prompt on stderr, read from TTY.
+    """No `--pass`/`-n` → prompt on stderr, read from TTY.
 
     The runner's normal `subprocess.run` plumbs stdin to /dev/null so any
     accidental prompt fails fast; this test deliberately drives a real
@@ -70,14 +68,11 @@ def test_ntlm_password_prompt(target: Target) -> None:
         "--attrs", "sAMAccountName",
         "--no-banner",
     ]
-    # Strip AD_PASSWORD so the binary actually prompts.
-    env = {k: v for k, v in os.environ.items() if k != "AD_PASSWORD"}
     proc = pexpect.spawn(
         binary_path(),
         argv,
         encoding="utf-8",
         timeout=30,
-        env=env,  # type: ignore[arg-type]
         dimensions=(40, 200),
     )
     try:

@@ -55,12 +55,33 @@ var helpDACLOptions = `
                        (repeatable)
           --ace-type   allowed | denied (default allowed)
           --inheritance            Set CONTAINER_INHERIT_ACE on added ACEs
-          --inherited-object-guid  GUID for INHERITED_OBJECT_TYPE (implies an
-                                   object ACE; affects which child types inherit)
+                                   (the ACE applies to the target and propagates
+                                   to descendant objects). This is the flag AD
+                                   uses for inheritance; every AD object is a
+                                   container in the ACL model.
+          --inherit-only           Set INHERIT_ONLY_ACE on added ACEs: the ACE
+                                   does NOT apply to the target itself, only to
+                                   inheriting children. Requires --inheritance
+                                   to have any effect.
+          --ace-flags              Raw ACE flags byte (hex 0x.. or decimal) as an
+                                   alternative to --inheritance/--inherit-only,
+                                   e.g. 0x0A for CONTAINER_INHERIT|INHERIT_ONLY.
+                                   Mutually exclusive with those two flags.
+          --inherited-object-guid  Schema GUID for INHERITED_OBJECT_TYPE: scope
+                                   inheritance to one descendant object class
+                                   (e.g. computer = bf967a86-0de6-11d0-a285-
+                                   00aa003049e2). Combine with --inheritance
+                                   --inherit-only.
           --resolve-sids           Resolve SIDs to names in read output, and
                                    resolve unknown object GUIDs live from the
                                    forest (Extended-Rights / schema)
           --file       File path for backup/restore (base64 of the raw SD)
+
+    For action=remove, an ACE matches on trustee, type, mask, and object GUIDs
+    (--right-guid / --inherited-object-guid). ACE flags are ignored by default,
+    so a grant is removed regardless of its inheritance settings; pass any of
+    --inheritance/--inherit-only/--ace-flags to additionally require an exact
+    ACE-flags match (e.g. to remove the inherit-only copy but not another).
 
     Examples:
       dacl --action read --target krbtgt --resolve-sids
@@ -79,6 +100,8 @@ type daclCmd struct {
 	rightGUIDs   repeatStrFlag
 	aceType      string
 	inheritance  bool
+	inheritOnly  bool
+	aceFlagsHex  string
 	inheritedOID string
 	resolveSIDs  bool
 	file         string
@@ -99,7 +122,9 @@ func (c *daclCmd) DefineFlags(f *flag.FlagSet) {
 	f.Var(&c.rightGUIDs, "right-guid", "Extended-right/property GUID for an object ACE (repeatable)")
 	f.StringVar(&c.aceType, "ace-type", "allowed", "ACE type: allowed or denied")
 	f.BoolVar(&c.inheritance, "inheritance", false, "Set CONTAINER_INHERIT_ACE on added ACEs")
-	f.StringVar(&c.inheritedOID, "inherited-object-guid", "", "INHERITED_OBJECT_TYPE GUID (implies object ACE)")
+	f.BoolVar(&c.inheritOnly, "inherit-only", false, "Set INHERIT_ONLY_ACE: ACE applies only to inheriting children, not the target")
+	f.StringVar(&c.aceFlagsHex, "ace-flags", "", "Raw ACE flags byte (hex 0x.. or decimal); alternative to --inheritance/--inherit-only, e.g. 0x0A")
+	f.StringVar(&c.inheritedOID, "inherited-object-guid", "", "Schema GUID to scope inheritance to one descendant class (combine with --inheritance --inherit-only)")
 	f.BoolVar(&c.resolveSIDs, "resolve-sids", false, "Resolve SIDs to names, and unknown object GUIDs live from the forest, in read output")
 	f.StringVar(&c.file, "file", "", "File path for backup/restore")
 }
@@ -132,6 +157,13 @@ func (c *daclCmd) validate() error {
 		if len(c.rights) == 0 && c.maskStr == "" && len(c.rightGUIDs) == 0 {
 			return fmt.Errorf("specify at least one of --rights, --mask, --right-guid for action %q", c.action)
 		}
+		// INHERIT_ONLY without CONTAINER_INHERIT yields an ACE that applies to
+		// nothing (neither the target nor any child), so reject it as almost
+		// certainly a mistake. Only meaningful for add; remove matches on
+		// type/mask/GUID and ignores ACE flags (acesEquivalent).
+		if c.action == "add" && c.inheritOnly && !c.inheritance {
+			return fmt.Errorf("--inherit-only requires --inheritance; an inherit-only ACE with no inheritance flag applies to nothing")
+		}
 	case "backup", "restore":
 		if c.file == "" {
 			return fmt.Errorf("--file is required for action %q", c.action)
@@ -145,6 +177,14 @@ func (c *daclCmd) validate() error {
 	case "", "allowed", "denied": // empty defaults to allowed (see aceTypeByte)
 	default:
 		return fmt.Errorf("--ace-type must be 'allowed' or 'denied', got %q", c.aceType)
+	}
+	// --ace-flags is a raw alternative to the inheritance booleans; allowing both
+	// would be ambiguous (which wins?), so require exactly one source of flags.
+	if c.aceFlagsHex != "" && (c.inheritance || c.inheritOnly) {
+		return fmt.Errorf("--ace-flags is mutually exclusive with --inheritance/--inherit-only; specify flags one way")
+	}
+	if _, err := c.parsedAceFlags(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -421,7 +461,11 @@ func daclAdd(conn *ldap.Conn, baseDN string, c *daclCmd, dn string, blob []byte,
 	if err != nil {
 		return err
 	}
-	newACEs, err := buildACEsForGrant(trusteeSID, c.aceTypeByte(), c.aceFlags(), c.rights, mask, c.rightGUIDs, c.inheritedOID)
+	flags, err := c.parsedAceFlags()
+	if err != nil {
+		return err
+	}
+	newACEs, err := buildACEsForGrant(trusteeSID, c.aceTypeByte(), flags, c.rights, mask, c.rightGUIDs, c.inheritedOID)
 	if err != nil {
 		return err
 	}
@@ -465,12 +509,20 @@ func daclRemove(conn *ldap.Conn, baseDN string, c *daclCmd, dn string, blob []by
 	if err != nil {
 		return err
 	}
-	// Build the set of ACEs the request describes so removal can be narrowed
-	// to a specific ACE rather than every ACE for the trustee.
-	wantSpecific := len(c.rights) > 0 || mask != 0 || len(c.rightGUIDs) > 0
+	flags, err := c.parsedAceFlags()
+	if err != nil {
+		return err
+	}
+	// Narrow removal to the ACE(s) the request describes rather than every ACE
+	// for the trustee. The grant identity (type/mask/object GUIDs) is matched via
+	// acesEquivalent; ACE flags are matched only when the user specified them, so
+	// the default is permissive (a grant is removed regardless of inheritance)
+	// but an explicit --inheritance/--inherit-only/--ace-flags narrows further.
+	byGrant := len(c.rights) > 0 || mask != 0 || len(c.rightGUIDs) > 0
+	matchFlags := c.flagsSpecified()
 	var match []msdtyp.ACE
-	if wantSpecific {
-		match, err = buildACEsForGrant(trusteeSID, c.aceTypeByte(), c.aceFlags(), c.rights, mask, c.rightGUIDs, c.inheritedOID)
+	if byGrant {
+		match, err = buildACEsForGrant(trusteeSID, c.aceTypeByte(), flags, c.rights, mask, c.rightGUIDs, c.inheritedOID)
 		if err != nil {
 			return err
 		}
@@ -479,20 +531,7 @@ func daclRemove(conn *ldap.Conn, baseDN string, c *daclCmd, dn string, blob []by
 	kept := sd.Dacl.ACLS[:0:0]
 	var removed int
 	for _, ace := range sd.Dacl.ACLS {
-		drop := false
-		if ace.Sid.ToString() == trusteeSID {
-			if !wantSpecific {
-				drop = true
-			} else {
-				for _, m := range match {
-					if acesEquivalent(ace, m) {
-						drop = true
-						break
-					}
-				}
-			}
-		}
-		if drop {
+		if ace.Sid.ToString() == trusteeSID && aceMatchesRemoval(ace, match, byGrant, matchFlags, flags) {
 			removed++
 			continue
 		}
@@ -539,12 +578,39 @@ func daclRestore(conn *ldap.Conn, c *daclCmd, dn string, w io.Writer) error {
 	return nil
 }
 
-func (c *daclCmd) aceFlags() byte {
+// parsedAceFlags returns the ACE Header.Flags byte to apply to added ACEs,
+// taken from either the raw --ace-flags value (hex 0x.. or decimal) or the
+// --inheritance / --inherit-only booleans. The two sources are mutually
+// exclusive (enforced in validate).
+func (c *daclCmd) parsedAceFlags() (byte, error) {
+	if c.aceFlagsHex != "" {
+		s := strings.TrimSpace(c.aceFlagsHex)
+		base := 10
+		if strings.HasPrefix(strings.ToLower(s), "0x") {
+			s = s[2:]
+			base = 16
+		}
+		v, err := strconv.ParseUint(s, base, 8)
+		if err != nil {
+			return 0, fmt.Errorf("invalid --ace-flags %q (must be a single byte): %w", c.aceFlagsHex, err)
+		}
+		return byte(v), nil
+	}
 	var f byte
 	if c.inheritance {
 		f |= msdtyp.ContainerInheritAce
 	}
-	return f
+	if c.inheritOnly {
+		f |= msdtyp.InheritOnlyAce
+	}
+	return f, nil
+}
+
+// flagsSpecified reports whether the user explicitly requested any ACE flags,
+// by either the inheritance booleans or a raw --ace-flags value. Used by remove
+// to decide whether to also match on ACE flags (otherwise they are ignored).
+func (c *daclCmd) flagsSpecified() bool {
+	return c.aceFlagsHex != "" || c.inheritance || c.inheritOnly
 }
 
 // writeSD marshals the descriptor and replaces nTSecurityDescriptor, scoping
@@ -586,7 +652,8 @@ func recomputeDaclSizes(dacl *msdtyp.PACL) {
 
 // acesEquivalent reports whether two ACEs grant the same thing to the same SID:
 // same type, mask, trustee, and object GUIDs. ACE flags are intentionally
-// ignored so removal/dedup is not defeated by inheritance differences.
+// ignored so removal's default match is not defeated by inheritance differences
+// (add-dedup layers an explicit flags comparison on top; see daclHasEquivalentACE).
 func acesEquivalent(a, b msdtyp.ACE) bool {
 	return a.Header.Type == b.Header.Type &&
 		a.Mask == b.Mask &&
@@ -596,9 +663,42 @@ func acesEquivalent(a, b msdtyp.ACE) bool {
 		a.InheritedObjectType == b.InheritedObjectType
 }
 
+// aceMatchesRemoval decides whether an existing ACE (already known to belong to
+// the target trustee) should be removed for a `remove` request. byGrant is true
+// when the request named a grant via rights/mask/right-guid, in which case the
+// ACE must be acesEquivalent to one of the requested grants. matchFlags is true
+// when the user specified ACE flags (via --inheritance/--inherit-only or a raw
+// --ace-flags), in which case the ACE's flags byte must equal flags exactly.
+// With neither specified the match is permissive: every ACE for the trustee.
+func aceMatchesRemoval(ace msdtyp.ACE, match []msdtyp.ACE, byGrant, matchFlags bool, flags byte) bool {
+	if !byGrant && !matchFlags {
+		return true
+	}
+	drop := true
+	if byGrant {
+		drop = false
+		for _, m := range match {
+			if acesEquivalent(ace, m) {
+				drop = true
+				break
+			}
+		}
+	}
+	if drop && matchFlags && ace.Header.Flags != flags {
+		drop = false
+	}
+	return drop
+}
+
+// daclHasEquivalentACE reports whether the DACL already contains the same grant
+// with the same inheritance scope. Unlike removal's default match, dedup is
+// flag-aware: the same grant with different ACE flags (e.g. an inherit-only ACE
+// that applies to children versus a non-inherited ACE that applies to the
+// target) is a distinct entry that may legitimately coexist, so adding one must
+// not be suppressed by the presence of the other.
 func daclHasEquivalentACE(dacl *msdtyp.PACL, ace msdtyp.ACE) bool {
 	for _, e := range dacl.ACLS {
-		if acesEquivalent(e, ace) {
+		if acesEquivalent(e, ace) && e.Header.Flags == ace.Header.Flags {
 			return true
 		}
 	}

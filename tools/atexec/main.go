@@ -46,12 +46,13 @@ import (
 	"github.com/jfjallid/go-smb/gss"
 	"github.com/jfjallid/go-smb/smb"
 	"github.com/jfjallid/go-smb/spnego"
+	"github.com/jfjallid/gokrb5/v9/keytab"
 	"github.com/jfjallid/golog"
 )
 
 var (
 	log            = golog.Get("main")
-	release string = "0.1.1"
+	release string = "0.1.2"
 )
 
 var helpMsg = `
@@ -72,6 +73,8 @@ var helpMsg = `
           --dns-host <ip:port>     Override system's default DNS resolver
           --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
           --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+          --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                                   domain are taken from the first keytab entry if not specified
       -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
       -c, --command <str>          Command to execute
       -a, --args <str>             Command arguments
@@ -210,7 +213,7 @@ func randomTaskName() string {
 }
 
 func main() {
-	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, command, cmdArgs string
+	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, command, cmdArgs, keytabFile string
 	var port, socksPort int
 	var localUser, forceSMB2, version, noPass, kerberos, dnsTCP, noenc, noDelete, listLog bool
 	var debug, verbose logFlag
@@ -250,6 +253,7 @@ func main() {
 	flag.StringVar(&targetIP, "target-ip", "", "")
 	flag.StringVar(&dcIP, "dc-ip", "", "")
 	flag.StringVar(&aesKey, "aes-key", "", "")
+	flag.StringVar(&keytabFile, "keytab-file", "", "")
 	flag.StringVar(&dnsHost, "dns-host", "", "")
 	flag.BoolVar(&dnsTCP, "dns-tcp", false, "")
 	flag.BoolVar(&noenc, "noenc", false, "")
@@ -365,13 +369,28 @@ func main() {
 			return
 		}
 	}
+    var kt *keytab.Keytab
+    if keytabFile != "" {
+        // A keytab is a Kerberos credential: select Kerberos (implies -k) and
+        // load it. The principal/realm are derived from the keytab by the go-smb
+        // initiator when --user/--domain are not supplied.
+        kerberos = true
+        var kerr error
+        kt, kerr = keytab.Load(keytabFile)
+        if kerr != nil {
+            log.Errorf("failed to load keytab %s: %s\n", keytabFile, kerr)
+            return
+        }
+    }
 
 	if noPass {
 		password = ""
 		hashBytes = nil
 		aesKeyBytes = nil
 	} else {
-		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) {
+		// A keytab is a valid credential source, so don't prompt for a password
+		// when one is supplied.
+		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) && (kt == nil) {
 			// Check if password is already specified to be empty
 			if !isFlagSet("p") && !isFlagSet("pass") {
 				fmt.Printf("Enter password: ")
@@ -424,6 +443,7 @@ func main() {
 				Hash:        hashBytes,
 				AESKey:      aesKeyBytes,
 				SPN:         "cifs/" + host,
+				Keytab:      kt,
 				DCIP:        dcIP,
 				DialTimeout: dialTimeout,
 				ProxyDialer: dialSocksProxy,

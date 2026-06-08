@@ -51,12 +51,13 @@ import (
 	"github.com/jfjallid/go-smb/gss"
 	"github.com/jfjallid/go-smb/ldap"
 	"github.com/jfjallid/go-smb/spnego"
+	"github.com/jfjallid/gokrb5/v9/keytab"
 	"github.com/jfjallid/golog"
 )
 
 var (
 	log            = golog.Get("main")
-	release string = "0.1.2"
+	release string = "0.1.3"
 )
 
 var helpMsg = `
@@ -76,6 +77,8 @@ var helpMsg = `
           --dns-host <ip:port>     Override system's default DNS resolver
           --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
           --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+          --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                                   domain are taken from the first keytab entry if not specified
       -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
           --target <DOMAIN\User>   Single target account to DCSync
           --target-file <path>     Read target accounts from file, one account per line
@@ -328,7 +331,7 @@ func saslSecurityFromArgs(mode string) ldap.SASLMode {
 }
 
 func main() {
-	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, target, ldapFilter, excludeUsers, targetFile, format, saslModeStr string
+	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, target, ldapFilter, excludeUsers, targetFile, format, saslModeStr, keytabFile string
 	var port, socksPort int
 	var version, noPass, kerberos, dnsTCP, useSamr, history, ntlmOnly, noenc, tls, starttls, enabled, channelBind, listLog bool
 	var debug, verbose logFlag
@@ -368,6 +371,7 @@ func main() {
 	flag.StringVar(&targetIP, "target-ip", "", "")
 	flag.StringVar(&dcIP, "dc-ip", "", "")
 	flag.StringVar(&aesKey, "aes-key", "", "")
+	flag.StringVar(&keytabFile, "keytab-file", "", "")
 	flag.StringVar(&dnsHost, "dns-host", "", "")
 	flag.BoolVar(&dnsTCP, "dns-tcp", false, "")
 	flag.StringVar(&target, "target", "", "")
@@ -543,12 +547,26 @@ func main() {
 		}
 	}
 
+	var kt *keytab.Keytab
+	if keytabFile != "" {
+		// A keytab is a Kerberos credential: select Kerberos (implies -k) and
+		// load it. The principal/realm are derived from the keytab by the go-smb
+		// initiator when --user/--domain are not supplied.
+		kerberos = true
+		var kerr error
+		kt, kerr = keytab.Load(keytabFile)
+		if kerr != nil {
+			log.Errorf("failed to load keytab %s: %s\n", keytabFile, kerr)
+			return
+		}
+	}
+
 	if noPass {
 		password = ""
 		hashBytes = nil
 		aesKeyBytes = nil
 	} else {
-		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) {
+		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) && (kt == nil) {
 			if !isFlagSet("p") && !isFlagSet("pass") {
 				fmt.Printf("Enter password: ")
 				passBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -600,6 +618,7 @@ func main() {
 				Domain:      domain,
 				Hash:        hashBytes,
 				AESKey:      aesKeyBytes,
+				Keytab:      kt,
 				SPN:         "host/" + host,
 				DCIP:        dcIP,
 				DialTimeout: dialTimeout,

@@ -83,10 +83,6 @@ pytest tests/ldaptool/auth_matrix/
 
 # Everything
 pytest tests/ldaptool/
-
-# Or via the Makefile:
-make test-ldaptool
-make test-ldaptool PYTEST_ARGS='-m "not destructive" -v'
 ```
 
 ## Mutation safety

@@ -49,8 +49,8 @@ def run(args: Sequence[str], timeout: float = DEFAULT_TIMEOUT) -> Result:
     """Spawn the binary with the given args, capture both streams.
 
     The binary prompts for a password on stdin if --pass / --hash / --aes-key
-    / --no-pass / --anonymous are all absent and AD_PASSWORD is unset; we
-    feed /dev/null so any unintended prompt fails fast rather than hanging.
+    / --no-pass / --anonymous are all absent; we feed /dev/null so any
+    unintended prompt fails fast rather than hanging.
     """
     argv = [binary_path(), *args]
     proc = subprocess.run(

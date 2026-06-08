@@ -44,12 +44,13 @@ import (
 	"github.com/jfjallid/go-smb/dcerpc/msdcom"
 	"github.com/jfjallid/go-smb/gss"
 	"github.com/jfjallid/go-smb/spnego"
+	"github.com/jfjallid/gokrb5/v9/keytab"
 	"github.com/jfjallid/golog"
 )
 
 var (
 	log            = golog.Get("main")
-	release string = "0.1.1"
+	release string = "0.1.2"
 )
 
 var helpMsg = `
@@ -71,6 +72,8 @@ var helpMsg = `
           --dns-host <ip:port>     Override system's default DNS resolver
           --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
           --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+          --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                                   domain are taken from the first keytab entry if not specified
       -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
       -q, --query <str>            WQL query string
           --namespace <str>        WMI namespace (default //./root/cimv2)
@@ -203,7 +206,7 @@ func wmiQuery(conn *msdcom.DCOMConnection, namespace, query string) ([]map[strin
 }
 
 func main() {
-	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, query, namespace string
+	var host, username, password, hash, domain, socksHost, targetIP, dcIP, aesKey, dnsHost, query, namespace, keytabFile string
 	var port, socksPort int
 	var localUser, nullSession, version, noPass, kerberos, dnsTCP, noenc, listLog bool
 	var debug, verbose logFlag
@@ -244,6 +247,7 @@ func main() {
 	flag.StringVar(&targetIP, "target-ip", "", "")
 	flag.StringVar(&dcIP, "dc-ip", "", "")
 	flag.StringVar(&aesKey, "aes-key", "", "")
+	flag.StringVar(&keytabFile, "keytab-file", "", "")
 	flag.StringVar(&dnsHost, "dns-host", "", "")
 	flag.BoolVar(&dnsTCP, "dns-tcp", false, "")
 	flag.BoolVar(&noenc, "noenc", false, "")
@@ -356,12 +360,26 @@ func main() {
 		}
 	}
 
+	var kt *keytab.Keytab
+	if keytabFile != "" {
+		// A keytab is a Kerberos credential: select Kerberos (implies -k) and
+		// load it. The principal/realm are derived from the keytab by the go-smb
+		// initiator when --user/--domain are not supplied.
+		kerberos = true
+		var kerr error
+		kt, kerr = keytab.Load(keytabFile)
+		if kerr != nil {
+			log.Errorf("failed to load keytab %s: %s\n", keytabFile, kerr)
+			return
+		}
+	}
+
 	if noPass {
 		password = ""
 		hashBytes = nil
 		aesKeyBytes = nil
 	} else {
-		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) {
+		if (password == "") && (hashBytes == nil) && (aesKeyBytes == nil) && (kt == nil) {
 			if (username != "") && (!nullSession) {
 				// Check if password is already specified to be empty
 				if !isFlagSet("p") && !isFlagSet("pass") {
@@ -430,6 +448,7 @@ func main() {
 					Domain:   domain,
 					Hash:     hashBytes,
 					AESKey:   aesKeyBytes,
+					Keytab:   kt,
 					SPN:      "host/" + host, //cifs works for endpoint mapper, but host will be required for authenticating to the dynamic port.
 					// If "host" spn is not mapped to cifs, change to use cifs but make sure when using CCACHE to have either a TGT or both cifs
 					// and host service tickets in the ccache file.

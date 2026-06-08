@@ -81,7 +81,6 @@ Coverage gaps below. Some of these are intentional (out of scope per the plan), 
 - `--override-spn`
 - `--dns-host` / `--dns-tcp`
 - `--debug`, `--verbose` (log levels)
-- `AD_PASSWORD` env var (we always pass `--pass`)
 
 ## Auth-matrix gaps (Tier 0)
 

@@ -237,8 +237,14 @@ func TestACEEquivalence(t *testing.T) {
 		t.Error("ResetPassword and WriteMembers must not be equivalent")
 	}
 	dacl := &msdtyp.PACL{ACLS: []msdtyp.ACE{a[0]}}
-	if !daclHasEquivalentACE(dacl, b[0]) {
-		t.Error("daclHasEquivalentACE should match on grant equivalence")
+	// Dedup is flag-aware: the same grant with a different inheritance scope is a
+	// distinct ACE that may coexist, so it must not be reported as already present.
+	if daclHasEquivalentACE(dacl, b[0]) {
+		t.Error("daclHasEquivalentACE should treat different inheritance flags as distinct")
+	}
+	// An identical ACE (same grant and same flags) is already present.
+	if !daclHasEquivalentACE(dacl, a[0]) {
+		t.Error("daclHasEquivalentACE should match an identical ACE")
 	}
 	if daclHasEquivalentACE(dacl, c[0]) {
 		t.Error("daclHasEquivalentACE matched a different grant")
@@ -302,6 +308,82 @@ func TestDaclEditRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParsedAceFlags(t *testing.T) {
+	const ci = msdtyp.ContainerInheritAce
+	const io = msdtyp.InheritOnlyAce
+	cases := []struct {
+		name string
+		cmd  *daclCmd
+		want byte
+		err  bool
+	}{
+		{"none", &daclCmd{}, 0, false},
+		{"inheritance", &daclCmd{inheritance: true}, ci, false},
+		{"inheritance+inherit-only", &daclCmd{inheritance: true, inheritOnly: true}, ci | io, false},
+		{"raw hex", &daclCmd{aceFlagsHex: "0x0A"}, 0x0A, false},
+		{"raw decimal", &daclCmd{aceFlagsHex: "10"}, 0x0A, false},
+		{"raw overflows byte", &daclCmd{aceFlagsHex: "0x100"}, 0, true},
+		{"raw not a number", &daclCmd{aceFlagsHex: "xyz"}, 0, true},
+	}
+	for _, c := range cases {
+		got, err := c.cmd.parsedAceFlags()
+		if c.err {
+			if err == nil {
+				t.Errorf("%s: expected error", c.name)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", c.name, err)
+		}
+		if got != c.want {
+			t.Errorf("%s: parsedAceFlags = %#x, want %#x", c.name, got, c.want)
+		}
+	}
+	// Raw flags and the inheritance booleans are mutually exclusive.
+	mix := &daclCmd{action: "add", target: "bob", trustee: "evil",
+		rights: repeatStrFlag{"FullControl"}, aceFlagsHex: "0x0A", inheritance: true}
+	if err := mix.validate(); err == nil {
+		t.Error("validate should reject --ace-flags combined with --inheritance")
+	}
+}
+
+func TestAceMatchesRemoval(t *testing.T) {
+	const ci = msdtyp.ContainerInheritAce
+	const io = msdtyp.InheritOnlyAce
+	// Two grants for the same trustee: a plain one (no flags) and an
+	// inherit-only one (CI|IO).
+	plain, _ := buildACEsForGrant(testTrustee, msdtyp.AccessAllowedAceType, 0, []string{"FullControl"}, 0, nil, "")
+	inherit, _ := buildACEsForGrant(testTrustee, msdtyp.AccessAllowedAceType, ci|io, []string{"FullControl"}, 0, nil, "")
+	other, _ := buildACEsForGrant(testTrustee, msdtyp.AccessAllowedAceType, 0, []string{"ResetPassword"}, 0, nil, "")
+
+	// Permissive default (no grant, no flags): matches any ACE for the trustee.
+	if !aceMatchesRemoval(plain[0], nil, false, false, 0) {
+		t.Error("permissive removal should match every ACE for the trustee")
+	}
+
+	// By grant only: FullControl request matches both flag variants (flags
+	// ignored) but not a different grant.
+	match := plain
+	if !aceMatchesRemoval(plain[0], match, true, false, 0) {
+		t.Error("grant match should drop the plain FullControl ACE")
+	}
+	if !aceMatchesRemoval(inherit[0], match, true, false, 0) {
+		t.Error("grant match should drop the inherit-only FullControl ACE (flags ignored)")
+	}
+	if aceMatchesRemoval(other[0], match, true, false, 0) {
+		t.Error("grant match must not drop a different grant (ResetPassword)")
+	}
+
+	// Grant + flags: only the ACE whose flags byte equals the requested flags.
+	if aceMatchesRemoval(plain[0], match, true, true, ci|io) {
+		t.Error("flag-specific removal must not drop the plain ACE when CI|IO requested")
+	}
+	if !aceMatchesRemoval(inherit[0], match, true, true, ci|io) {
+		t.Error("flag-specific removal should drop the CI|IO ACE")
+	}
+}
+
 func TestIsDomainObject(t *testing.T) {
 	if !isDomainObject([]string{"top", "domain", "domainDNS"}) {
 		t.Error("domainDNS object should be recognised as the domain head")
@@ -343,12 +425,12 @@ func TestDaclValidate(t *testing.T) {
 		}
 	}
 	bad := []*daclCmd{
-		{action: "read"},                                   // no target
-		{action: "add", target: "bob"},                     // no trustee
-		{action: "add", target: "bob", trustee: "evil"},    // no rights/mask/guid
-		{action: "backup", target: "bob"},                  // no file
-		{action: "bogus", target: "bob"},                   // bad action
-		{action: "read", target: "bob", aceType: "weird"},  // bad ace-type
+		{action: "read"},                                  // no target
+		{action: "add", target: "bob"},                    // no trustee
+		{action: "add", target: "bob", trustee: "evil"},   // no rights/mask/guid
+		{action: "backup", target: "bob"},                 // no file
+		{action: "bogus", target: "bob"},                  // bad action
+		{action: "read", target: "bob", aceType: "weird"}, // bad ace-type
 	}
 	for _, c := range bad {
 		if err := c.validate(); err == nil {

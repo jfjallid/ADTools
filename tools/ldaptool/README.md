@@ -1,14 +1,17 @@
 # LdapTool
 
 A Go CLI for LDAP enumeration and post-exploitation against Active Directory.
-Supports search and modify, user/computer creation, SPN management, Shadow
-Credentials (`msDS-KeyCredentialLink`), Resource-Based Constrained Delegation,
-group membership editing, LAPS password reads, and signing / channel-binding
-detection. Includes an interactive shell.
+Supports search and modify, object deletion, user/computer creation, password
+set/reset, SPN management, Shadow Credentials (`msDS-KeyCredentialLink`),
+Resource-Based Constrained Delegation, DACL and owner editing on security
+descriptors, effective-access computation, group membership editing, LAPS
+password reads, and signing / channel-binding detection. Includes an
+interactive shell.
 
 Bind methods: NTLM (default), Kerberos (GSSAPI), LDAP simple, anonymous.
 Transport: plain LDAP, LDAPS, StartTLS, optionally tunneled through SOCKS5.
-Pass-the-hash (`--hash`) and pass-the-key (`--aes-key`) supported.
+Pass-the-hash (`--hash`), pass-the-key (`--aes-key`), and keytab
+(`--keytab-file`) authentication supported.
 
 ## Build
 ```sh
@@ -35,6 +38,7 @@ ldaptool --version
 | `shadow-credentials`     | Manage `msDS-KeyCredentialLink` (Shadow Credentials)       |
 | `rbcd`                   | Manage `msDS-AllowedToActOnBehalfOfOtherIdentity` (RBCD)   |
 | `dacl`                   | View and modify DACLs on object security descriptors       |
+| `owner`                  | View and change the owner SID of a security descriptor     |
 | `access`                 | Compute a principal's effective access to an object        |
 | `group`                  | Add or remove group members                                |
 | `laps`                   | Read LAPS local-admin passwords                            |
@@ -71,7 +75,7 @@ NTLM is used unless `--simple`, `--anonymous`, or `--kerberos` is given.
 |-----------------------|----------------------------------------------------|
 | `-d, --domain`        | AD domain (e.g. `CORP`)                            |
 | `-u, --user`          | Username (or full DN with `--simple`)              |
-| `-p, --pass`          | Password (or set `AD_PASSWORD` env var). If empty, prompts on terminal. |
+| `-p, --pass`          | Password. If empty, prompts on terminal. |
 |     `--hash`          | NT hash (pass-the-hash for NTLM, RC4 key for Kerberos) |
 | `-n, --no-pass`       | Send no password (unauthenticated NTLM bind)       |
 |     `--simple`        | LDAP simple bind (DN/password). Refuses cleartext without TLS unless `--sasl=none`. |
@@ -86,6 +90,7 @@ NTLM is used unless `--simple`, `--anonymous`, or `--kerberos` is given.
 | `--krb5conf`     | Path to `krb5.conf` (default: `/etc/krb5.conf`)               |
 | `--realm`        | Kerberos realm (defaults to upper-cased `--domain`)           |
 | `--aes-key`      | Hex AES128/256 key                                            |
+| `--keytab-file`  | Authenticate from a Kerberos keytab (implies `-k`; principal and realm default to the keytab's first entry, overridable with `--user` and `--realm`/`--domain`) |
 | `--override-spn` | Service principal name (default: `ldap/<host>`)               |
 | `--dc-ip`        | KDC address override for Kerberos (`host[:port]`, default port 88) |
 | `--target-ip`    | IP to connect to for LDAP; skips DNS resolution of `--host`   |
@@ -224,8 +229,9 @@ ldaptool set-password --host dc.corp.local --tls -d CORP -u victim -p - \
     --target victim
 ```
 
-In the interactive shell the command is `setpassword` (same flags with single
-dashes, e.g. `setpassword -reset -target victim -newpass 'NewP@ss1!'`).
+In the interactive shell the command is `set-password` (flags use single dashes
+and the password flags are abbreviated, e.g.
+`set-password -reset -target victim -newpass 'NewP@ss1!'`).
 
 ### `spn` — Manage `servicePrincipalName`
 
@@ -266,9 +272,10 @@ Edits the target's `msDS-AllowedToActOnBehalfOfOtherIdentity` attribute.
 
 | Flag        | Description                                                                       |
 | ----------- | --------------------------------------------------------------------------------- |
-| `--action`  | `add` \| `list` \| `remove` \| `clear` (required)                                 |
-| `--target`  | `sAMAccountName` of the resource being delegated TO (required)                    |
-| `--trustee` | SID or `sAMAccountName` allowed to delegate (required for add/remove; repeatable) |
+| `--action`   | `add` \| `list` \| `remove` \| `clear` (required)                                 |
+| `--target`   | `sAMAccountName` of the resource being delegated TO (required)                    |
+| `--trustee`  | SID or `sAMAccountName` allowed to delegate (required for add/remove; repeatable) |
+| `--dry-mode` | Do not write; print the security-descriptor bytes that would be set (only valid with `--action add`) |
 
 ```sh
 ldaptool rbcd --host dc.corp.local -d CORP -u alice -p Passw0rd! \
@@ -290,8 +297,10 @@ as DCSync and ResetPassword, and per-property writes) are fully supported.
 | `--mask`                  | Raw `ACCESS_MASK`, hex (`0x..`) or decimal                                  |
 | `--right-guid`            | Extended-right/property GUID for an object ACE (repeatable)                 |
 | `--ace-type`              | `allowed` or `denied` (default `allowed`)                                   |
-| `--inheritance`           | Set `CONTAINER_INHERIT_ACE` on added ACEs                                   |
-| `--inherited-object-guid` | `INHERITED_OBJECT_TYPE` GUID (implies an object ACE)                        |
+| `--inheritance`           | Set `CONTAINER_INHERIT_ACE` on added ACEs (AD's inheritance flag)            |
+| `--inherit-only`          | Set `INHERIT_ONLY_ACE`; the ACE applies to children only, not the target. Requires `--inheritance` |
+| `--ace-flags`             | Raw ACE flags byte (hex `0x..` or decimal), e.g. `0x0A`; alternative to `--inheritance`/`--inherit-only` (mutually exclusive) |
+| `--inherited-object-guid` | Schema GUID for `INHERITED_OBJECT_TYPE`: scope inheritance to one descendant class (e.g. computer = `bf967a86-0de6-11d0-a285-00aa003049e2`) |
 | `--resolve-sids`          | Resolve SIDs to names in `read` output                                      |
 | `--file`                  | File path for `backup`/`restore` (base64 of the raw descriptor)             |
 
@@ -299,6 +308,20 @@ Reads request `OWNER|GROUP|DACL` via the SD-flags control (no `SeSecurityPrivile
 needed); writes are scoped to the DACL so owner/group/SACL are left untouched.
 When the target is the domain object itself, `read` also flags any principal
 whose ACEs effectively grant DCSync (the replication rights only apply there).
+
+For `remove`, an ACE matches on trustee, type, mask, and the object GUIDs
+(`--right-guid` / `--inherited-object-guid`). ACE flags are ignored by default,
+so a grant is removed regardless of its inheritance settings; passing any of
+`--inheritance`/`--inherit-only`/`--ace-flags` additionally requires an exact
+ACE-flags match (e.g. to remove the inherit-only copy and leave others).
+
+```sh
+# Grant FullControl to all descendant computer objects under a container
+ldaptool dacl --host dc.corp.local -d CORP -u alice -p Passw0rd! \
+    --action add --target 'CN=Computers,DC=corp,DC=local' --trustee svc01 \
+    --rights FullControl --inheritance --inherit-only \
+    --inherited-object-guid bf967a86-0de6-11d0-a285-00aa003049e2
+```
 
 ```sh
 # View a DACL with permissions and SIDs resolved
@@ -312,6 +335,37 @@ ldaptool dacl --host dc.corp.local -d CORP -u alice -p Passw0rd! \
 # Grant ResetPassword over a user, then remove just that ACE
 ldaptool dacl ... --action add    --target bob --trustee attacker --rights ResetPassword
 ldaptool dacl ... --action remove --target bob --trustee attacker --rights ResetPassword
+```
+
+### `owner` — View and change a security descriptor's owner
+
+Reads and changes the Owner SID of an object's `nTSecurityDescriptor` (cf.
+impacket's `owneredit.py`). This matters because the owner of an AD object holds
+an implicit, irrevocable `WRITE_DAC` right over it regardless of the DACL: an
+attacker with `WriteOwner` over a target can take ownership and then rewrite the
+DACL to grant themselves an abusable right (DCSync, ResetPassword, …). Backing
+up and restoring the owner is the corresponding remediation.
+
+| Flag             | Description                                                    |
+| ---------------- | -------------------------------------------------------------- |
+| `--action`       | `read` \| `set` \| `backup` \| `restore` (required)            |
+| `--target`       | Object to operate on: `sAMAccountName`, DN, or SID (required)  |
+| `--owner`        | New owner: `sAMAccountName`, DN, or SID (required for `set`)    |
+| `--file`         | File path for `backup`/`restore` (stores the owner SID)        |
+| `--resolve-sids` | Resolve SIDs to names in `read` output                         |
+
+Writes are scoped to the owner via the SD-flags control, so the DACL, group, and
+SACL are left untouched.
+
+```sh
+# Read the current owner, names resolved
+ldaptool owner --host dc.corp.local -d CORP -u alice -p Passw0rd! \
+    --action read --target dc01 --resolve-sids
+
+# Back up, take ownership, then later restore
+ldaptool owner ... --action backup  --target victim --file victim.owner
+ldaptool owner ... --action set     --target victim --owner attacker
+ldaptool owner ... --action restore --target victim --file victim.owner
 ```
 
 ### `access` — Compute a principal's effective access
@@ -440,10 +494,12 @@ ldaptool shell --host dc.corp.local -d CORP -u alice -p Passw0rd!
 | `deleteobject`     | Delete an LDAP object                                        |
 | `createuser`       | Create a new AD user                                         |
 | `createcomputer`   | Create a new AD computer                                     |
+| `set-password`     | Set or change an account's password (`unicodePwd`)           |
 | `spn`              | Manage `servicePrincipalName`                                |
 | `shadowcreds`      | Manage `msDS-KeyCredentialLink`                              |
 | `rbcd`             | Manage RBCD                                                  |
 | `dacl`             | View and modify object DACLs                                 |
+| `owner`            | View and change a security descriptor's owner               |
 | `access`           | Compute a principal's effective access to an object         |
 | `group`            | Add or remove group members                                  |
 | `laps`             | Read LAPS passwords                                          |
@@ -453,7 +509,6 @@ ldaptool shell --host dc.corp.local -d CORP -u alice -p Passw0rd!
 
 | Variable             | Purpose                                                         |
 |----------------------|-----------------------------------------------------------------|
-| `AD_PASSWORD`        | Fallback password when `--pass` is not supplied                 |
 | `KRB5CCNAME`         | Default Kerberos credential cache (used if `--ccache` is empty) |
 | `LDAPTOOL_HISTORY`   | Shell history file path (default: `~/.ldaptool_history`)        |
 | `SSLKEYLOGFILE`      | TLS key log file path (for packet decryption while debugging)   |

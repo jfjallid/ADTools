@@ -6,8 +6,8 @@ github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667 h1:BP4M0CvQ
 github.com/go-asn1-ber/asn1-ber v1.5.8-0.20250403174932-29230038a667/go.mod h1:hEBeB/ic+5LoWskz+yKT7vGhhPYkProFKoKdwZRWMe0=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
-github.com/jfjallid/go-smb v0.10.0 h1:7dr6P83un1zoJxaya2Tjl+jmWkG5C87+T0mDMrZZblQ=
-github.com/jfjallid/go-smb v0.10.0/go.mod h1:FIyyI2xkwEhBHS/u2JlLMCF2Qf5xeBuQJLxXVBHZRXo=
+github.com/jfjallid/go-smb v0.10.1 h1:hPTjpM8+lCAni97Pb+8nKiz3IfPuaym4nEJl/PLJ+6Y=
+github.com/jfjallid/go-smb v0.10.1/go.mod h1:FIyyI2xkwEhBHS/u2JlLMCF2Qf5xeBuQJLxXVBHZRXo=
 github.com/jfjallid/gofork v1.7.6 h1:OYyS2HH597860gkDxxjNsl+NZRxoAnuRI6ZsP++kYKE=
 github.com/jfjallid/gofork v1.7.6/go.mod h1:r1EH4W9KY5iqtiGhAupnbzMRONsLDApdJ9EZH5NWFSc=
 github.com/jfjallid/gokrb5/v9 v9.0.0 h1:G7jtD9JHApKbWGJLCPAY30ubbfpYyN1uK9QBAx7RrLg=

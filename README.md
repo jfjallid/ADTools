@@ -40,6 +40,8 @@ options:
       --dns-host <ip:port>     Override system's default DNS resolver
       --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
       --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+      --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                               domain are taken from the first keytab entry if not specified
   -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
   -c, --command <str>          Command to execute
       --workdir <str>          Working directory for command
@@ -75,6 +77,8 @@ options:
       --dns-host <ip:port>     Override system's default DNS resolver
       --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
       --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+      --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                               domain are taken from the first keytab entry if not specified
   -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
   -q, --query <str>            WQL query string
       --namespace <str>        WMI namespace (default //./root/cimv2)
@@ -149,6 +153,8 @@ options:
       --dns-host <ip:port>     Override system's default DNS resolver
       --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
       --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+      --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                               domain are taken from the first keytab entry if not specified
   -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
   -c, --command <str>          Command to execute
   -a, --args <str>             Command arguments
@@ -184,6 +190,8 @@ options:
       --dns-host <ip:port>     Override system's default DNS resolver
       --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
       --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+      --keytab-file <file>     Authenticate using keys from a keytab file (implies -k). User and
+                               domain are taken from the first keytab entry if not specified
   -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
       --target <DOMAIN\User>   Single target account to DCSync
       --target-file <path>     Read target accounts from file, one account per line
@@ -250,7 +258,7 @@ Run 'ldaptool <subcommand> --help' for action-specific options.
     Authentication (NTLM unless --simple/--anonymous/--kerberos):
       -d, --domain               AD domain (e.g. CORP)
       -u, --user                 Username (or full DN with --simple)
-      -p, --pass                 Password (or set AD_PASSWORD env var)
+      -p, --pass                 Password (bare -p prompts on terminal)
           --hash                 NT hash (pass-the-hash / Kerberos RC4)
       -n, --no-pass              Send no password (unauthenticated NTLM bind)
           --simple               LDAP simple bind (DN/password)
@@ -262,9 +270,23 @@ Run 'ldaptool <subcommand> --help' for action-specific options.
           --krb5conf             Path to krb5.conf (default: /etc/krb5.conf)
           --realm                Kerberos realm (defaults to upper-cased --domain)
           --aes-key              Hex AES128/256 key
+          --keytab-file <file>   Authenticate with a Kerberos keytab (implies -k;
+                                 principal and realm default to the keytab's first
+                                 entry, overridable with --user and --realm/--domain)
           --override-spn         Service principal name (default: ldap/<host>)
-          --dc-ip <ip[:port]>    KDC address override (default port 88)
+          --dc-ip <ip[:port]>    KDC address override for Kerberos (default port 88)
+          --target-ip <ip>       IP to connect to for LDAP; skips DNS of --host
           --dns-host <ip[:port]> Override system's default DNS resolver (default port 53)
           --dns-tcp              Force DNS lookups over TCP
+
+    Diagnostics:
+          --debug                Enable debug logging. Bare --debug turns on every registered
+                                 package; --debug=ldap,smb turns on only the listed package-name
+                                 suffixes (the '=' form is required for the filter).
+          --verbose              Enable verbose output. Same filter syntax as --debug. --debug
+                                 and --verbose may be combined with different filters; a package
+                                 targeted by both gets the higher level.
+          --list-log-packages    List the registered log package names that can be targeted with
+                                 --debug=<suffix> or --verbose=<suffix>, then exit
 
 ```
