@@ -290,3 +290,172 @@ Run 'ldaptool <subcommand> --help' for action-specific options.
                                  --debug=<suffix> or --verbose=<suffix>, then exit
 
 ```
+
+### RPCTrigger
+Authentication coercion. Forces the target to authenticate to a listener via
+`ElfrOpenBELW` (MS-EVEN) or `RpcRemoteFindFirstPrinterChangeNotificationEx`
+(MS-RPRN).
+```
+Usage: ./rpctrigger [options]
+
+    options:
+          --host <target>          Hostname or ip address of remote server. Must be hostname when using Kerberos
+      -P, --port <int>             SMB Port (default 445)
+      -d, --domain <name/fqdn>     Domain name to use for login
+      -u, --user <string>          Username
+      -p, --pass <string>          Password
+      -n, --no-pass                Disable password prompt and send no credentials
+          --hash <NT Hash>         Hex encoded NT Hash for user password
+          --local                  Authenticate as a local user instead of domain user
+      -k, --kerberos               Use Kerberos authentication. (KRB5CCNAME will be checked on Linux)
+          --dc-ip <ip>             Optionally specify ip of KDC when using Kerberos authentication
+          --target-ip <ip>         Optionally specify ip of target when using Kerberos authentication
+          --dns-host <ip:port>     Override system's default DNS resolver
+          --dns-tcp                Force DNS lookups over TCP. Default true when using --socks-host
+          --aes-key <hex>          Use a hex encoded AES128/256 key for Kerberos authentication
+          --keytab-file <file>     Authenticate with a Kerberos keytab (implies -k; principal and realm are read from the keytab when --user/--domain are omitted)
+      -t, --timeout <duration>     Dial timeout specified in 5s, 1m, 10m format (default 5s)
+          --method <even|rprn>     Coercion method: "even" (ElfrOpenBELW) or "rprn" (RpcRemoteFindFirstPrinterChangeNotificationEx)
+          --listener <unc>         Trigger destination. UNC backup file path for "even", listener UNC (e.g. \\10.0.0.1) for "rprn"
+          --socks-host <target>    Establish connection via a SOCKS5 proxy server
+          --socks-port <port>      SOCKS5 proxy port (default 1080)
+          --noenc                  Disable smb encryption
+          --smb2                   Force smb 2.1
+          --debug                  Enable debug logging. Bare --debug turns on every
+                                   registered package; --debug=smb,dcerpc turns on only the
+                                   listed package-name suffixes (the '=' form is required
+                                   for the filter).
+          --verbose                Enable verbose logging. Same filter syntax as --debug.
+                                   --debug and --verbose may be combined with different
+                                   filters; a package targeted by both gets the higher level.
+          --list-log-packages      List the registered log package names that can be
+                                   targeted with --debug=<suffix> or --verbose=<suffix>,
+                                   then exit
+      -v, --version                Show version
+```
+
+### GPOParser
+Understand what Active Directory GPOs *do* (GptTmpl.inf security settings, GPP
+Groups/Registry/Tasks/Services, Registry.pol, scripts) and *where* they apply
+(gPLink + OU inheritance → affected computers). Reads SYSVOL over SMB and queries
+AD over LDAP.
+
+This tool is mostly a port of https://github.com/Group3r/Group3r to Go to support
+running it from Linux, but it also includes a few features from https://github.com/synacktiv/gpoParser.
+So credit goes to them for all their hard work creating those tools.
+```
+Usage: gpoparser <subcommand> [options]
+
+Subcommands:
+  assess     Flag exploitable GPO misconfigurations (privileges, groups, registry, creds)
+  display    Show what GPOs change (groups, privileges, registry, scripts...)
+  enrich     Emit SharpHound-native JSON for BloodHound CE upload
+  local      Parse GPOs offline from a local SYSVOL copy + LDAP dump
+  query      Map GPOs to affected computers (and vice versa)
+  remote     Enumerate and parse GPOs live over LDAP + SYSVOL
+
+Run 'gpoparser <subcommand> --help' for mode-specific options.
+
+    Connection options (remote mode):
+          --host                 DC hostname or IP (required; hostname for Kerberos)
+      -P, --port                 LDAP port (default 389, or 636 with --tls)
+          --tls                  Use LDAPS (implicit TLS)
+          --starttls             Use StartTLS on plain LDAP port
+          --insecure             Skip TLS certificate verification
+          --base-dn              Search base DN (auto-detected if omitted)
+          --sasl                 SASL security: none, sign, seal
+          --channel              Enable TLS channel binding
+          --smb-port             SMB port for SYSVOL (default 445)
+          --noenc                Disable SMB encryption when reading SYSVOL
+      -t, --timeout              Dial timeout (e.g. 5s, 1m; default 5s)
+          --socks-host           SOCKS5 proxy host
+          --socks-port           SOCKS5 proxy port (default 1080)
+
+    Authentication (NTLM unless --simple/--anonymous/--kerberos):
+      -d, --domain               AD domain (e.g. CORP)
+      -u, --user                 Username (or full DN with --simple)
+      -p, --pass                 Password (bare -p prompts on terminal)
+          --hash                 NT hash (pass-the-hash / Kerberos RC4)
+      -n, --no-pass              Send no password (unauthenticated bind)
+          --simple               LDAP simple bind (DN/password)
+          --anonymous            LDAP simple anonymous bind (no creds)
+
+    Kerberos (with -k/--kerberos):
+      -k, --kerberos             Use Kerberos (GSSAPI) instead of NTLM
+          --keytab-file <file>   Authenticate with a Kerberos keytab (implies -k; principal and
+                                 realm are read from the keytab when --user/--domain are omitted)
+          --ccache               Kerberos credential cache file (falls back to $KRB5CCNAME)
+          --krb5conf             Path to krb5.conf (default: /etc/krb5.conf)
+          --realm                Kerberos realm (defaults to upper-cased --domain)
+          --aes-key              Hex AES128/256 key
+          --override-spn         LDAP service principal name (default: ldap/<host>)
+          --dc-ip <ip[:port]>    KDC address override (default port 88)
+          --target-ip <ip>       IP to connect to; skips DNS of --host
+          --dns-host <ip[:port]> Override system's default DNS resolver (default port 53)
+          --dns-tcp              Force DNS lookups over TCP
+
+    Diagnostics:
+          --debug                Enable debug logging. Bare --debug turns on every registered
+                                 package; --debug=smb,ldap turns on only the listed package-name
+                                 suffixes (the '=' form is required for the filter).
+          --verbose              Enable verbose logging. Same filter syntax as --debug. --debug
+                                 and --verbose may be combined with different filters; a package
+                                 targeted by both gets the higher level.
+          --list-log-packages    List the registered log package names that can be targeted with
+                                 --debug=<suffix> or --verbose=<suffix>, then exit
+```
+
+### SMBServer
+A standalone SMB server: serve disk/memory shares, capture incoming NTLM
+authentications (Net-NTLMv2, hashcat format), and act as a drop/landing point
+for coercion. Configurable via CLI flags or a YAML file.
+```
+Usage: ./smbserver [options]
+
+    options:
+          --config <path>         YAML config file (CLI flags override any field)
+      -b, --bind <addr>           Listen address (default :445)
+
+      SMB protocol:
+          --min-dialect <ver>     2.0.2 | 2.1 | 3.0 | 3.0.2 | 3.1.1 (default 2.0.2)
+          --max-dialect <ver>     ... (default 3.1.1)
+          --no-encryption         Disable SMB 3.x encryption capability (default: advertised)
+          --require-encryption    Force every session into encrypted mode (only applies to smb 3.1.1)
+          --require-signing       Advertise signing required
+          --netbios-name <name>   Advertised NetBIOS server name (default GO-SMB)
+          --netbios-domain <name> Advertised NetBIOS domain (default WORKGROUP)
+          --dns-name <fqdn>       Advertised DNS computer name
+          --dns-domain <name>     Advertised DNS domain name
+          --ntlm-challenge <hex>  Hardcode the server's ntlm challenge
+
+      Sessions:
+          --allow-guest           Permit guest sessions on auth failure
+          --allow-anonymous       Permit null sessions
+
+      Shares (repeatable):
+          --share <spec>          name=Public,backend=disk,path=/srv/pub,readonly=true,encrypt=false
+                                  or name=Drop,backend=memory
+
+      Accounts (repeatable):
+          --account <spec>        user=alice,domain=WORKGROUP,password=secret
+                                  or user=alice,nthash=<32-hex>
+
+      Credential dumping:
+          --dump-creds            Log every captured NTLM AUTH (Net-NTLMv2 hashcat)
+          --cred-log <path>       Append hashcat lines to file (mode 0600)
+
+      IP whitelist (repeatable):
+          --allow-ip <cidr>       Whitelist CIDR or IP. If any --allow-ip is set,
+                                  others are silently dropped via OnConnect.
+
+      Diagnostics:
+          --debug                 Debug logging. Bare --debug turns on every registered
+                                  package; --debug=smb,server turns on only the listed
+                                  package-name suffixes (the '=' form is required for the filter).
+          --verbose               Verbose logging (info). Same filter syntax as --debug.
+                                  --debug and --verbose may be combined with different filters;
+                                  a package targeted by both gets the higher level.
+          --list-log-packages     List the registered log package names that can be targeted
+                                  with --debug=<suffix> or --verbose=<suffix>, then exit
+      -v, --version               Show version
+```

@@ -1,0 +1,66 @@
+# Example smbserver config. CLI flags override any field set here.
+listen: ":4445"
+
+netbios:
+  name: "FILESRV01"
+  domain: "WORKGROUP"
+  dns_name: ""
+  dns_domain: ""
+
+dialects:
+  min: "2.0.2"
+  max: "3.1.1"
+
+encryption:
+  supported: true
+  required: false
+
+signing:
+  required: false
+
+sessions:
+  allow_guest: false
+  allow_anonymous: false
+
+# Per-share permissions:
+#   - readonly: true    -> kill switch; nobody writes (mutually exclusive with the fields below).
+#   - writable_users    -> list of accounts allowed to write. Omit/empty = all authenticated users
+#                          can write (the original default). Anyone who can connect can read.
+#   - allow_anonymous_write / allow_guest_write -> opt-in writes for null/guest sessions. These
+#     also require the matching global sessions.allow_anonymous / sessions.allow_guest above.
+shares:
+  - name: "Public"
+    backend: "memory"
+    readonly: false
+    encrypt: false
+  - name: "Drop"
+    backend: "disk"
+    path: "/tmp/smb-drop"
+    readonly: false
+    encrypt: false
+    writable_users: ["alice"]
+  - name: "Anon"
+    backend: "disk"
+    path: "/tmp/smb-anon"
+    allow_anonymous_write: true
+    allow_guest_write: true
+  - name: "ReadOnly"
+    backend: "disk"
+    path: "/tmp"
+    readonly: true
+
+accounts:
+  - user: "alice"
+    domain: "WORKGROUP"
+    password: "secret"
+  - user: "bob"
+    domain: "WORKGROUP"
+    nthash: "36AA83BDCAB3C9FDAF321CA42A31C3FC"
+
+credentials:
+  dump: true
+  log_file: "/tmp/smbserver-creds.log"
+
+ip_whitelist:
+  - "127.0.0.1"
+  - "10.0.0.0/8"
